@@ -39,7 +39,7 @@ set (CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
 set (LIBS ${cpp-matplotlib_LIBS} ${OpenCV_LIBS})
 
-target_link_libraries (${PROJECT_NAME} ${EXTRA_LIBS} ${LIBS})
+target_link_libraries (${PROJECT_NAME} ${EXTRA_LIBS} ${LIBS} flycapture)
 
 # Compile flags
 SET (CMAKE_C_FLAGS                "-Wall -std=c11 -Wextra -Werror")
