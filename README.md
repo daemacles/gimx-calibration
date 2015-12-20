@@ -1,17 +1,23 @@
 # About
 
-This is a template directory structure for C++ projects.  It has support for
-YouCompleteMe in Vim.
+Calibrate the mouse input control curves for GIMX using a video feed.
 
 # Usage
 
-  0) Modify contents of this file and LICENSE 
-  1) Add source files and edit CMakeLists.txt as necessary
-  2) Use
+## Requirements
+
+  * daemacles/cpp-matplotlib
+  * Eigen3
+  * OpenCV
+  * FlyCap2 SDK from PointGrey
+
+## Compiling
 
     $ mkdir build
     $ cd build
-    $ cmake -DCMAKE_RELEASE_TYPE=[Debug|Release|RelWithDebInfo] ..
+    $ cmake ..
     $ make
+    $ ./gimx-calibration
 
-
+By default cmake is set to use clang, edit CMakeLists.txt if you need
+something else.

@@ -1,5 +1,5 @@
 cmake_minimum_required (VERSION 2.6)
-set (PROJECT_NAME MyProject)
+set (PROJECT_NAME gimx-calibration)
 project (${PROJECT_NAME})
 
 add_executable (${PROJECT_NAME} src/main.cc) # link libraries located below
@@ -17,8 +17,8 @@ option (USE_GLIBCXX_DEBUG
 #option (USE_MY_LIBRARY
 #        "Use the provided library" ON)
 
-SET (CMAKE_C_COMPILER             "/usr/bin/clang-3.5")
-SET (CMAKE_CXX_COMPILER             "/usr/bin/clang++-3.5")
+SET (CMAKE_C_COMPILER             "clang")
+SET (CMAKE_CXX_COMPILER             "clang++")
 
 ## Support for Clang's CompilationDatabase system
 set (CMAKE_EXPORT_COMPILE_COMMANDS 1)
