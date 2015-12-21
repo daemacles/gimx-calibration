@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -23,6 +24,9 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
+#include <opencv2/features2d.hpp>
+#include <opencv2/xfeatures2d.hpp>
+#include <opencv2/xfeatures2d/nonfree.hpp>
 
 #include <cpp_mpl.hpp>
 
@@ -231,6 +235,7 @@ int main() {
   gimx.Connect();
 
   auto GetImage = [&] () {
+    constexpr double SCALE = 1.0;
     Image rawImage;
     error = camera.RetrieveBuffer( &rawImage );
     if (error != PGRERROR_OK) {
@@ -248,9 +253,7 @@ int main() {
                                 rawImage.GetStride());
     //cv::Mat image(tmp_image, cv::Rect(10, 110, 620, 60));
     cv::Mat image;
-    //cv::resize(tmp_image, image, cv::Size(240, 240), 0, 0, cv::INTER_CUBIC);
-    cv::resize(tmp_image, image, cv::Size(0, 0), 0.5, 0.5, cv::INTER_CUBIC);
-    //image = tmp_image;
+    cv::resize(tmp_image, image, cv::Size(0, 0), SCALE, SCALE, cv::INTER_CUBIC);
     return image;
   };
 
@@ -266,6 +269,7 @@ int main() {
 
   std::vector<double> magnitudes;
   std::vector<double> angles;
+  auto detdes_ptr = cv::BRISK::create();
 
   // capture loop
   while(key != 'q') {
@@ -280,47 +284,72 @@ int main() {
 
     XboneControl ctl;
     ctl.right_stick.x = 32000 * sin(counter / 2);
-    ctl.right_stick.x = 22000;
+    ctl.right_stick.x = 32000;
     gimx.SendControl(ctl);
+
+    usleep(0.5 * 1e6);
 
     // Get the image
     image = GetImage();
+    cv::Mat image_1 = image;
 
-    cv::Mat flow(image.rows, image.cols, CV_32FC2);
-    cv::calcOpticalFlowFarneback(prev_image, image, flow,
-                                 0.5, // pyr_scale
-                                 4,   // pyramid levels
-                                 7,   // window size
-                                 4,   // iterations
-                                 5,   // poly_n expansion (5 or 7 good)
-                                 1.1, // poly sigma
-                                 0);  // flags
+    // Skip some frames -- keeps timing accurate
+    for (size_t skips = 2; skips != 0; --skips) {
+      GetImage();
+    }
 
-    cv::split(flow, planes);
-    cv::Mat mag, angle;
-    cv::cartToPolar(planes[0], planes[1], mag, angle, false);
-    cv::Mat hsv_parts[3];
-    hsv_parts[0] = angle * 180 / M_PI / 2;
-    hsv_parts[1] = hsv_parts[0].clone();
-    hsv_parts[1] = 255;
-    hsv_parts[2] = mag * 1.0;
-    //cv::normalize(mag, hsv_parts[2], 0, 255, cv::NORM_MINMAX);
+    cv::Mat image_2 = GetImage();
 
-    cv::Mat output_image;
-    cv::merge(hsv_parts, 3, output_image);
+    std::vector<cv::KeyPoint> keypoints_1;
+    detdes_ptr->detect(image_1, keypoints_1);
 
-    //cv::imshow("image", output_image);
-    //cv::imshow("image", image);//planes[0]);
-    cv::imshow("image", planes[0]);
+    cv::Mat descriptor_1;
+    detdes_ptr->compute(image_1, keypoints_1, descriptor_1);
+    if(descriptor_1.type() != CV_32F) {
+      descriptor_1.convertTo(descriptor_1, CV_32F);
+    }
 
-    double x_min, x_max, y_min, y_max;
-    cv::Point x_min_loc, x_max_loc, y_min_loc, y_max_loc;
-    cv::minMaxLoc(planes[0], &x_min, &x_max, &x_min_loc, &x_max_loc);
-    cv::minMaxLoc(planes[1], &y_min, &y_max, &y_min_loc, &y_max_loc);
-    angles.push_back(std::atan2(y_max, x_max)/M_PI * 180);
-    //magnitudes.push_back(std::sqrt(x_max*x_max + y_max*y_max));
-    magnitudes.push_back(x_max);
+    std::vector<cv::KeyPoint> keypoints_2;
+    detdes_ptr->detect(image_2, keypoints_2);
 
+    cv::Mat descriptor_2;
+    detdes_ptr->compute(image_2, keypoints_2, descriptor_2);
+    if(descriptor_2.type() != CV_32F) {
+      descriptor_2.convertTo(descriptor_2, CV_32F);
+    }
+
+    cv::FlannBasedMatcher matcher;
+    std::vector<std::vector<cv::DMatch>> raw_matches;
+    matcher.knnMatch(descriptor_1, descriptor_2, raw_matches, 2);
+
+    // Use ratio matching
+    std::vector<cv::DMatch> ratio_matches;
+    for (size_t idx = 0; idx != raw_matches.size(); ++idx) {
+      if (raw_matches[idx][0].distance < 0.45*raw_matches[idx][1].distance) {
+        ratio_matches.push_back(raw_matches[idx][0]);
+      }
+    }
+
+//    // Get rid of impossible matches
+//    std::vector<cv::DMatch> filter_matches;
+//    std::copy_if(ratio_matches.begin(), ratio_matches.end(),
+//                 std::back_inserter(filter_matches),
+//      [&](const cv::DMatch &match) {
+//      return std::abs(keypoints_1[match.queryIdx].pt.y -
+//                      keypoints_2[match.trainIdx].pt.y) < 12;
+//      });
+//    std::cout << "Removed " << ratio_matches.size() - filter_matches.size() << " matches\n";
+
+    cv::Mat color_image;
+    cv::cvtColor(image, color_image, cv::COLOR_GRAY2RGB);
+    for (const auto &match : ratio_matches) {
+      cv::circle(color_image, keypoints_1[match.queryIdx].pt, 3, {0, 0, 255});
+      cv::line(color_image, keypoints_1[match.queryIdx].pt,
+               keypoints_2[match.trainIdx].pt, {0, 0, 255});
+    }
+//    cv::drawMatches(image_1, keypoints_1, image_2, keypoints_2, ratio_matches,
+//                    color_image, {0, 0, 255});
+    cv::imshow("image", color_image);
     key = cv::waitKey(1) & 0xff;
   }
 
