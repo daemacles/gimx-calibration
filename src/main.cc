@@ -143,41 +143,6 @@ private:
   int32_t sock_fd_;
 };
 
-int old_main(int argc, char **argv) {
-  // DELETE THESE.  Used to suppress unused variable warnings.
-  (void)argc;
-  (void)argv;
-
-
-  GimxConnection gimx("localhost", 7799);
-  gimx.Connect();
-
-  XboneControl ctl;
-
-  ctl.left_stick.x = 20000;
-  gimx.SendControl(ctl);
-
-  usleep(1 * 1e6);
-
-  ctl.left_stick.x = 0;
-  gimx.SendControl(ctl);
-
-  //auto mpl = MplConnect();
-  //auto data = MatrixXd(5, 2);
-  //data <<
-  //  1, 1,
-  //  2, 4,
-  //  3, 9,
-  //  4, 16,
-  //  5, 25;
-  //
-  //auto np_data = NumpyArray("XX", data.data(), 5, 2);
-  //
-  //mpl.SendData(np_data);
-  //mpl.RunCode("plot(XX[:, 0], XX[:, 1])");
-
-  return 0;
-}
 
 cppmpl::CppMatplotlib MplConnect (std::string config_path="") {
   if (config_path == "") {
@@ -258,18 +223,16 @@ int main() {
   };
 
   cv::Mat image = GetImage();
-  cv::Mat prev_image = image.clone();
 
   char key = 0;
   struct timeval prev_time;
   gettimeofday(&prev_time, NULL);
   double diff_us = 0;
   double counter = 0;
-  cv::Mat planes[2];
 
-  std::vector<double> magnitudes;
-  std::vector<double> angles;
   auto detdes_ptr = cv::BRISK::create();
+
+  std::vector<std::array<double, 4>> motion_vecs;
 
   // capture loop
   while(key != 'q') {
@@ -284,17 +247,17 @@ int main() {
 
     XboneControl ctl;
     ctl.right_stick.x = 32000 * sin(counter / 2);
-    ctl.right_stick.x = 32000;
+    ctl.right_stick.x = 22000;
     gimx.SendControl(ctl);
 
-    usleep(0.5 * 1e6);
+    //usleep(0.5 * 1e6);
 
     // Get the image
     image = GetImage();
     cv::Mat image_1 = image;
 
     // Skip some frames -- keeps timing accurate
-    for (size_t skips = 2; skips != 0; --skips) {
+    for (size_t skips = 3; skips != 0; --skips) {
       GetImage();
     }
 
@@ -343,9 +306,13 @@ int main() {
     cv::Mat color_image;
     cv::cvtColor(image, color_image, cv::COLOR_GRAY2RGB);
     for (const auto &match : ratio_matches) {
-      cv::circle(color_image, keypoints_1[match.queryIdx].pt, 3, {0, 0, 255});
-      cv::line(color_image, keypoints_1[match.queryIdx].pt,
-               keypoints_2[match.trainIdx].pt, {0, 0, 255});
+      auto pt1 = keypoints_1[match.queryIdx].pt;
+      auto pt2 = keypoints_2[match.trainIdx].pt;
+      cv::circle(color_image, pt1, 3, {0, 0, 255});
+      cv::line(color_image, pt1, pt2, {0, 0, 255});
+      if (std::abs(pt2.x - pt1.x) > 4) {
+        motion_vecs.push_back({{pt1.x, pt1.y, pt2.x-pt1.x, pt2.y-pt1.y}});
+      }
     }
 //    cv::drawMatches(image_1, keypoints_1, image_2, keypoints_2, ratio_matches,
 //                    color_image, {0, 0, 255});
@@ -371,17 +338,14 @@ int main() {
     mpl.SendData(np_data);
   };
 
-  auto sendVec = [&] (const std::vector<double> &vec, const std::string &name) {
-    mpl.SendData(NumpyArray(name, vec));
-  };
+//  auto sendVec = [&] (const std::vector<double> &vec, const std::string &name) {
+//    mpl.SendData(NumpyArray(name, vec));
+//  };
 
-  sendVec(magnitudes, "magnitudes");
-  sendVec(angles, "angles");
+  mpl.SendData(NumpyArray("mv", (double*)motion_vecs.data(),
+                          motion_vecs.size(), 4));
 
-  sendMat(planes[0], "F0");
-  sendMat(planes[1], "F1");
   sendMat(image, "cur_image");
-  sendMat(prev_image, "prev_image");
 
   //mpl.RunCode("plot(XX[:, 0], XX[:, 1])");
 
