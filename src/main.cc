@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -143,6 +144,85 @@ private:
   int32_t sock_fd_;
 };
 
+namespace fc = FlyCapture2;
+class Flea3 {
+public:
+  Flea3 () {
+  }
+
+  ~Flea3 () {
+    fc::Error error = camera_.StopCapture();
+    if (error != fc::PGRERROR_OK) {
+      // This may fail when the camera was removed, so don't show
+      // an error message
+    }
+    camera_.Disconnect();
+  }
+
+  bool Connect () {
+    fc::Error error;
+
+    // Connect the camera_
+    error = camera_.Connect(0);
+    if ( error != fc::PGRERROR_OK ) {
+      std::cout << "Failed to connect to camera_" << std::endl;
+      return false;
+    }
+
+    // Get the camera_ info and print it out
+    error = camera_.GetCameraInfo(&camInfo_);
+    if (error != fc::PGRERROR_OK) {
+      std::cout << "Failed to get camera_ info from camera_" << std::endl;
+      return false;
+    }
+
+    std::cout << camInfo_.vendorName << " "
+      << camInfo_.modelName << " "
+      << camInfo_.serialNumber << std::endl;
+
+    error = camera_.StartCapture();
+    if (error == fc::PGRERROR_ISOCH_BANDWIDTH_EXCEEDED) {
+      std::cout << "Bandwidth exceeded" << std::endl;
+      return false;
+    }
+    else if (error != fc::PGRERROR_OK) {
+      std::cout << "Failed to start image capture" << std::endl;
+      return false;
+    }
+    return true;
+  }
+
+  cv::Mat GetImage () {
+    fc::Error error;
+
+    constexpr double SCALE = 1.0;
+    fc::Image rawImage;
+    error = camera_.RetrieveBuffer( &rawImage );
+    if (error != fc::PGRERROR_OK) {
+      std::cout << "capture error" << std::endl;
+    }
+
+    //     // convert to rgb
+    //    Image rgbImage;
+    //    rgbImage.SetColorProcessing(IPP);
+    //    rawImage.Convert( FlyCapture2::PIXEL_FORMAT_BGR, &rgbImage );
+
+    // Convert to OpenCV Mat
+    cv::Mat tmp_image = cv::Mat(rawImage.GetRows(), rawImage.GetCols(),
+                                CV_8UC1, rawImage.GetData(),
+                                rawImage.GetStride());
+    //cv::Mat image(tmp_image, cv::Rect(10, 110, 620, 60));
+    cv::Mat image;
+    cv::resize(tmp_image, image, cv::Size(0, 0), SCALE, SCALE, cv::INTER_CUBIC);
+    image.convertTo(image, CV_32F);
+    return image;
+  }
+
+private:
+  fc::Camera camera_;
+  fc::CameraInfo camInfo_;
+};
+
 
 cppmpl::CppMatplotlib MplConnect (std::string config_path="") {
   if (config_path == "") {
@@ -162,80 +242,83 @@ cppmpl::CppMatplotlib MplConnect (std::string config_path="") {
 }
 
 
-int main() {
-  using namespace FlyCapture2;
-  Error error;
-  Camera camera;
-  CameraInfo camInfo;
-
-  // Connect the camera
-  error = camera.Connect(0);
-  if ( error != PGRERROR_OK ) {
-    std::cout << "Failed to connect to camera" << std::endl;
-    return false;
-  }
-
-  // Get the camera info and print it out
-  error = camera.GetCameraInfo(&camInfo);
-  if (error != PGRERROR_OK) {
-    std::cout << "Failed to get camera info from camera" << std::endl;
-    return false;
-  }
-
-  std::cout << camInfo.vendorName << " "
-    << camInfo.modelName << " "
-    << camInfo.serialNumber << std::endl;
-
-  error = camera.StartCapture();
-  if (error == PGRERROR_ISOCH_BANDWIDTH_EXCEEDED) {
-    std::cout << "Bandwidth exceeded" << std::endl;
-    return false;
-  }
-  else if (error != PGRERROR_OK) {
-    std::cout << "Failed to start image capture" << std::endl;
-    return false;
-  }
+int main (int argc, char **argv) {
+  (void) argc;
+  (void) argv;
 
   GimxConnection gimx("localhost", 7799);
   gimx.Connect();
 
-  auto GetImage = [&] () {
-    constexpr double SCALE = 1.0;
-    Image rawImage;
-    error = camera.RetrieveBuffer( &rawImage );
-    if (error != PGRERROR_OK) {
-      std::cout << "capture error" << std::endl;
+  Flea3 flea3;
+  if (!flea3.Connect()) {
+    std::cerr << "Couldn't connect to camera" << std::endl;
+    std::exit(1);
+  }
+
+  flea3.GetImage();
+
+  XboneControl ctl;
+  ctl.right_stick.x = 25000;
+  gimx.SendControl(ctl);
+
+  // Compute mask
+  std::cout << "Creating motion mask. Takes about 10 seconds." << std::endl;
+  std::vector<cv::Mat> images;
+  for (size_t capture_count = 0; capture_count != 600; ++capture_count) {
+    images.push_back(flea3.GetImage() / 255.0);
+    cv::imshow("image", images.back());
+    cv::waitKey(1);
+    for (size_t skip_count = 0; skip_count != 1; ++skip_count) {
+      //flea3.GetImage();
     }
+  }
 
-    //     // convert to rgb
-    //    Image rgbImage;
-    //    rgbImage.SetColorProcessing(IPP);
-    //    rawImage.Convert( FlyCapture2::PIXEL_FORMAT_BGR, &rgbImage );
+  // Deltas between successive images
+  std::cout << "  Computing deltas" << std::endl;
+  std::vector<cv::Mat> diffs;
+  cv::Mat mean_diff = images[0].clone() * 0;
+  for (size_t idx = 1; idx != images.size(); ++idx) {
+    cv::Mat diff = images[idx] - images[idx-1];
+    mean_diff += diff;
+    diffs.push_back(diff);
+  }
+  mean_diff /= diffs.size();
 
-    // Convert to OpenCV Mat
-    cv::Mat tmp_image = cv::Mat(rawImage.GetRows(), rawImage.GetCols(),
-                                CV_8UC1, rawImage.GetData(),
-                                rawImage.GetStride());
-    //cv::Mat image(tmp_image, cv::Rect(10, 110, 620, 60));
-    cv::Mat image;
-    cv::resize(tmp_image, image, cv::Size(0, 0), SCALE, SCALE, cv::INTER_CUBIC);
-    return image;
-  };
+  // Stdev of the deltas
+  std::cout << "  Computing stdev" << std::endl;
+  cv::Mat std_diff = diffs[0].clone() * 0;
+  for (size_t idx = 0; idx != diffs.size(); ++idx) {
+    cv::Mat deviation = diffs[idx] - mean_diff;
+    std_diff += deviation.mul(deviation);
+  }
+  cv::sqrt(std_diff / diffs.size(), std_diff);
+  double min, max;
+  cv::minMaxLoc(std_diff, &min, &max);
+  std_diff = (std_diff - min) / (max - min);
 
-  cv::Mat image = GetImage();
+  // Create the mask
+  cv::Mat mask;
+  cv::GaussianBlur(std_diff, mask, cv::Size(0, 0), 1.0);
+  cv::threshold(mask, mask, 0.25, 1.0, cv::THRESH_BINARY);
+  cv::erode(mask, mask, cv::getStructuringElement(cv::MORPH_RECT,
+                                                  cv::Size(3, 3)));
+  mask *= 255;
+  mask.convertTo(mask, CV_8UC1);
 
+  cv::imshow("image", mask);
+  cv::waitKey(0);
+  exit(0);
+
+  // capture loop
   char key = 0;
   struct timeval prev_time;
   gettimeofday(&prev_time, NULL);
   double diff_us = 0;
   double counter = 0;
-
   auto detdes_ptr = cv::BRISK::create();
-
-  std::vector<std::array<double, 4>> motion_vecs;
-
-  // capture loop
-  while(key != 'q') {
+  images.clear();
+  for (size_t capture_count = 0; key != 'q' && capture_count < 20;
+       ++capture_count) {
     struct timeval time;
     gettimeofday(&time, NULL);
     diff_us = 0.5 * diff_us +
@@ -245,23 +328,40 @@ int main() {
     std::cout << "Period: " << 1e6 / diff_us << "Hz" << std::endl;
     counter += diff_us / 1e6;
 
-    XboneControl ctl;
-    ctl.right_stick.x = 32000 * sin(counter / 2);
-    ctl.right_stick.x = 22000;
-    gimx.SendControl(ctl);
-
-    //usleep(0.5 * 1e6);
-
     // Get the image
-    image = GetImage();
-    cv::Mat image_1 = image;
+    cv::Mat image = flea3.GetImage();
+    images.push_back(image);
+    cv::imshow("image", image);
 
     // Skip some frames -- keeps timing accurate
-    for (size_t skips = 3; skips != 0; --skips) {
-      GetImage();
+    for (size_t skips = 20; skips != 0; --skips) {
+      flea3.GetImage();
     }
+    key = cv::waitKey(1) & 0xff;
+  }
 
-    cv::Mat image_2 = GetImage();
+  // Now extract feature tracks
+
+  // Key is index into the first
+  std::map<int, std::vector<cv::KeyPoint>> feature_map;
+
+  std::vector<cv::KeyPoint> keypoints_0;
+  cv::Mat descriptor_0;
+  detdes_ptr->detectAndCompute(images[0], mask, keypoints_0,
+                               descriptor_0, false);
+  if(descriptor_0.type() != CV_32F) {
+    descriptor_0.convertTo(descriptor_0, CV_32F);
+  }
+
+  for (size_t idx = 1; idx != images.size(); ++idx) {
+
+  }
+
+
+  std::vector<std::array<double, 4>> motion_vecs;
+  if (false) {
+    cv::Mat image_1 = flea3.GetImage();
+    cv::Mat image_2 = flea3.GetImage();
 
     std::vector<cv::KeyPoint> keypoints_1;
     detdes_ptr->detect(image_1, keypoints_1);
@@ -304,7 +404,7 @@ int main() {
 //    std::cout << "Removed " << ratio_matches.size() - filter_matches.size() << " matches\n";
 
     cv::Mat color_image;
-    cv::cvtColor(image, color_image, cv::COLOR_GRAY2RGB);
+    cv::cvtColor(image_1, color_image, cv::COLOR_GRAY2RGB);
     for (const auto &match : ratio_matches) {
       auto pt1 = keypoints_1[match.queryIdx].pt;
       auto pt2 = keypoints_2[match.trainIdx].pt;
@@ -314,19 +414,10 @@ int main() {
         motion_vecs.push_back({{pt1.x, pt1.y, pt2.x-pt1.x, pt2.y-pt1.y}});
       }
     }
-//    cv::drawMatches(image_1, keypoints_1, image_2, keypoints_2, ratio_matches,
-//                    color_image, {0, 0, 255});
     cv::imshow("image", color_image);
-    key = cv::waitKey(1) & 0xff;
   }
 
   gimx.SendControl(XboneControl());
-
-  error = camera.StopCapture();
-  if (error != PGRERROR_OK) {
-    // This may fail when the camera was removed, so don't show
-    // an error message
-  }
 
   auto mpl = MplConnect("/tmp/kernel.json");
 
@@ -345,11 +436,14 @@ int main() {
   mpl.SendData(NumpyArray("mv", (double*)motion_vecs.data(),
                           motion_vecs.size(), 4));
 
-  sendMat(image, "cur_image");
+  sendMat(images.back(), "cur_image");
+  mpl.RunCode("images = []");
+  for (const auto& image : images) {
+    sendMat(image, "tmp_image");
+    mpl.RunCode("images.append(tmp_image)");
+  }
 
   //mpl.RunCode("plot(XX[:, 0], XX[:, 1])");
-
-  camera.Disconnect();
 
   return 0;
 }
