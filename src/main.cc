@@ -487,12 +487,15 @@ int main (int argc, char **argv) {
     std::vector<cv::DMatch> ratio_matches;
     for (size_t idx = 0; idx != raw_matches.size(); ++idx) {
       if (raw_matches[idx][0].distance < 0.45*raw_matches[idx][1].distance) {
+        std::cout << ".";
+        std::flush(std::cout);
         ratio_matches.push_back(raw_matches[idx][0]);
         feature_map[all_descriptors[raw_matches[idx][0].trainIdx]]
           .push_back(keypoints[raw_matches[idx][0].queryIdx]);
       }
     }
   }
+  std::cout << std::endl;
 
   std::vector<std::array<double, 2>> feature_points;
   for (const auto &kv : feature_map) {
