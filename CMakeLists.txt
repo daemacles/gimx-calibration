@@ -2,7 +2,21 @@ cmake_minimum_required (VERSION 2.6)
 set (PROJECT_NAME gimx-calibration)
 project (${PROJECT_NAME})
 
-add_executable (${PROJECT_NAME} src/main.cc) # link libraries located below
+# Compile flags
+SET (CMAKE_C_FLAGS                "-Wall -std=c11 -Wextra -Werror")
+SET (CMAKE_C_FLAGS_DEBUG          "${CMAKE_CFLAGS} -g")
+SET (CMAKE_C_FLAGS_MINSIZEREL     "${CMAKE_CFLAGS} -Os -DNDEBUG")
+SET (CMAKE_C_FLAGS_RELEASE        "${CMAKE_CFLAGS} -O3 -DNDEBUG")
+SET (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_CFLAGS} -O2 -g")
+
+SET (CMAKE_CXX_FLAGS                "-Wall -std=c++11 -Wextra -Werror")
+SET (CMAKE_CXX_FLAGS_DEBUG          "${CMAKE_CXXFLAGS} -g")
+SET (CMAKE_CXX_FLAGS_MINSIZEREL     "${CMAKE_CXXFLAGS} -Os -DNDEBUG")
+SET (CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXXFLAGS} -O2 -g")
+SET (CMAKE_CXX_FLAGS_RELEASE        "${CMAKE_CXXFLAGS} -O3 -DNDEBUG")
+
+set (CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake_modules")
+include (cotire)
 
 find_package (Eigen3 REQUIRED)
 include_directories(${EIGEN3_INCLUDE_DIR})
@@ -39,20 +53,11 @@ set (CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
 set (LIBS ${cpp-matplotlib_LIBS} ${OpenCV_LIBS})
 
+add_executable (${PROJECT_NAME} src/main.cc src/headers_pch.h)
 target_link_libraries (${PROJECT_NAME} ${EXTRA_LIBS} ${LIBS} flycapture)
-
-# Compile flags
-SET (CMAKE_C_FLAGS                "-Wall -std=c11 -Wextra -Werror")
-SET (CMAKE_C_FLAGS_DEBUG          "${CMAKE_CFLAGS} -g")
-SET (CMAKE_C_FLAGS_MINSIZEREL     "${CMAKE_CFLAGS} -Os -DNDEBUG")
-SET (CMAKE_C_FLAGS_RELEASE        "${CMAKE_CFLAGS} -O3 -DNDEBUG")
-SET (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_CFLAGS} -O2 -g")
-
-SET (CMAKE_CXX_FLAGS                "-Wall -std=c++11 -Wextra -Werror")
-SET (CMAKE_CXX_FLAGS_DEBUG          "${CMAKE_CXXFLAGS} -g")
-SET (CMAKE_CXX_FLAGS_MINSIZEREL     "${CMAKE_CXXFLAGS} -Os -DNDEBUG")
-SET (CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXXFLAGS} -O2 -g")
-SET (CMAKE_CXX_FLAGS_RELEASE        "${CMAKE_CXXFLAGS} -O3 -DNDEBUG")
+set_target_properties (
+  ${PROJECT_NAME} PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT "src/headers_pch.h")
+cotire (${PROJECT_NAME})
 
 if (USE_GLIBCXX_DEBUG)
   # Prefer using G++ for debug mode because the GLIBCXX_DEBUG flag for pretty
