@@ -57,7 +57,7 @@ add_executable (${PROJECT_NAME} src/main.cc src/headers_pch.h)
 target_link_libraries (${PROJECT_NAME} ${EXTRA_LIBS} ${LIBS} flycapture)
 set_target_properties (
   ${PROJECT_NAME} PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT "src/headers_pch.h")
-cotire (${PROJECT_NAME})
+#cotire (${PROJECT_NAME})
 
 if (USE_GLIBCXX_DEBUG)
   # Prefer using G++ for debug mode because the GLIBCXX_DEBUG flag for pretty

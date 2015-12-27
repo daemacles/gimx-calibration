@@ -1,4 +1,37 @@
-#include "headers_pch.h"
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdlib>
+#include <cstring>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <flycapture/FlyCapture2.h>
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>
+#include <opencv2/features2d.hpp>
+#include <opencv2/xfeatures2d.hpp>
+#include <opencv2/xfeatures2d/nonfree.hpp>
+
+#include <cpp_mpl.hpp>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-register"
@@ -14,9 +47,9 @@ typedef std::vector<cv::KeyPoint> KeyPointVec;
 
 cppmpl::CppMatplotlib MplConnect (std::string config_path);
 
-
 constexpr uint32_t GIMX_UDP_BUF_SIZE = 158;
 std::string MASK_IMAGE_FILE = "/tmp/mask.png";
+
 
 bool FileExists (std::string filename) {
   std::ifstream file_check(filename);
@@ -280,36 +313,11 @@ struct less<cv::Mat> {
 }
 
 
-void GetGoodDescriptors (MatVec &descriptors,
-                         KeyPointVec &keypoints,
-                         MatVec &good_descriptors,
-                         KeyPointVec &good_keypoints
-                            ) {
-  // See how good any of the new descriptors are by matching them against
-  // themselves and only selecting those unique enough
-  // Vector of vectors because each query will have k matches
-//  cv::Mat new_desc(new_descriptors.size(), new_descriptors[0].cols,
-//                   new_descriptors[0].type());
-//  for (size_t idx = 0; idx != new_descriptors.size(); ++idx) {
-//    new_desc.row(idx) = new_descriptors[idx];
-//  }
-
-  cv::BFMatcher new_matcher;
-  std::vector<std::vector<cv::DMatch>> new_raw_matches;
-  new_matcher.knnMatch(descriptors, descriptors, new_raw_matches, 2);
-
-  // Use ratio matching
-  //MatVec good_new_descriptors;
-  for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
-    cv::DMatch best_match = new_raw_matches[idx][0];
-    cv::DMatch second_best_match = new_raw_matches[idx][1];
-
-    if (best_match.distance < 0.45*second_best_match.distance) {
-      good_descriptors.push_back(descriptors[best_match.queryIdx]);
-      good_keypoints.push_back(keypoints[best_match.queryIdx]);
-    }
-  }
-}
+struct KeyPointNode {
+  cv::KeyPoint keypoint;
+  int parent;
+  bool leaf;
+};
 
 
 cv::Mat MatVecToMat (const MatVec &mv) {
@@ -320,6 +328,42 @@ cv::Mat MatVecToMat (const MatVec &mv) {
   return output;
 }
 
+
+// See how good any of the new descriptors are by matching them against
+// themselves and only selecting those unique enough.
+// Can use same variables for output as input.
+void GetGoodDescriptors (cv::InputArray descriptors,
+                         KeyPointVec &keypoints,
+                         cv::OutputArray good_descriptors,
+                         KeyPointVec &good_keypoints,
+                         double min_distance=650.00
+                         ) {
+  cv::BFMatcher new_matcher;
+  std::vector<std::vector<cv::DMatch>> new_raw_matches;
+  new_matcher.knnMatch(descriptors, descriptors, new_raw_matches, 3);
+
+  // Use ratio matching
+  cv::Mat descriptors_tmp = descriptors.getMat().clone();
+  KeyPointVec keypoints_tmp (keypoints);
+  MatVec descriptors_vec;
+  good_keypoints.clear();
+  for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
+    cv::DMatch best_match = new_raw_matches[idx][1];
+    //cv::DMatch second_best_match = new_raw_matches[idx][2];
+
+    //if (best_match.distance < ratio * second_best_match.distance) {
+    if (best_match.distance > min_distance) {
+      descriptors_vec.push_back(descriptors_tmp.row(best_match.queryIdx));
+      good_keypoints.push_back(keypoints_tmp[best_match.queryIdx]);
+    }
+  }
+  good_descriptors.create(descriptors_vec.size(), descriptors_vec[0].cols,
+                          descriptors_vec[0].type());
+  cv::Mat output_mat = good_descriptors.getMat();
+  for (size_t idx = 0; idx != descriptors_vec.size(); ++idx) {
+    output_mat.row(idx) = descriptors_vec[idx];
+  }
+}
 
 
 int main (int argc, char **argv) {
@@ -405,7 +449,7 @@ int main (int argc, char **argv) {
   double counter = 0;
   auto detdes_ptr = cv::BRISK::create();
   MatVec images;
-  for (size_t capture_count = 0; key != 'q' && capture_count < 5;
+  for (size_t capture_count = 0; key != 'q' && capture_count < 100;
        ++capture_count) {
     struct timeval time;
     gettimeofday(&time, NULL);
@@ -420,136 +464,166 @@ int main (int argc, char **argv) {
     cv::Mat image = flea3.GetImage();
     images.push_back(image);
     cv::imshow("image", image);
+    key = cv::waitKey(0) & 0xff;
 
     // Skip some frames -- keeps timing accurate
     for (size_t skips = 20; skips != 0; --skips) {
       flea3.GetImage();
     }
-    key = cv::waitKey(0) & 0xff;
   }
 
   // Now extract feature tracks
   // Pass 1, figure out all descriptors of interest.
   std::cout << "Extracting feature tracks" << std::endl;
 
-  MatVec good_descriptors;
+  int keypoint_counter = 0;
   MatVec all_descriptors;
-  KeyPointVec all_keypoints;
+  std::vector<KeyPointNode> keypoint_nodes;
 
-  cv::Mat image_0 = images[0];
-  KeyPointVec keypoints_0;
-  cv::Mat descriptor_0;
-  detdes_ptr->detectAndCompute(image_0, mask, keypoints_0,
-                               descriptor_0, false);
+  cv::Mat cur_image = images[0];
+  KeyPointVec cur_keypoints;
+  cv::Mat cur_descriptor;
+  detdes_ptr->detectAndCompute(cur_image, mask, cur_keypoints,
+                               cur_descriptor, false);
 
-  for (int row = 0; row != descriptor_0.rows; ++row) {
-    all_descriptors.push_back(descriptor_0.row(row).clone());
-    good_descriptors.push_back(descriptor_0.row(row).clone());
-    all_keypoints.push_back(keypoints_0[row]);
+  GetGoodDescriptors(cur_descriptor, cur_keypoints, cur_descriptor, cur_keypoints);
+  //std::cout << "Got " << cur_keypoints.size() << " keypoints" << std::endl;
+
+  for (int row = 0; row != cur_descriptor.rows; ++row) {
+    all_descriptors.push_back(cur_descriptor.row(row).clone());
+    KeyPointNode kpn;
+    kpn.keypoint = cur_keypoints[row];
+    kpn.keypoint.class_id = keypoint_counter++;
+    kpn.leaf = true;
+    kpn.parent = -1;
+
+    keypoint_nodes.push_back(kpn);
   }
 
-  cv::BFMatcher matcher;
 
-  // Key is index into the first
-  std::cout << "  Pass 1" << std::endl;
-  for (size_t idx = 1; idx != images.size(); ++idx) {
-    KeyPointVec keypoints;
-    cv::Mat descriptor;
-    detdes_ptr->detectAndCompute(images[idx], mask, keypoints,
-                                 descriptor, false);
+  // Track successive keypoints
+  for (size_t idx=1; idx != images.size(); ++idx) {
+    cv::Mat prev_descriptor = cur_descriptor.clone();
+    cur_descriptor = cv::Mat();
 
-//    for (int row = 0; row != descriptor.rows; ++row) {
-//      all_descriptors.push_back(descriptor.row(row).clone());
-//      all_keypoints.push_back(keypoints[row]);
-//    }
+    KeyPointVec prev_keypoints(cur_keypoints);
+    cur_keypoints.clear();
 
-//    // Vector of vectors because each query will have k matches
-//    std::vector<std::vector<cv::DMatch>> raw_matches;
-//    matcher.knnMatch(descriptor, good_descriptors, raw_matches, 2, cv::Mat());
-//
-//    // Use ratio matching
-//    std::vector<cv::DMatch> ratio_matches;
-//    MatVec new_descriptors;
-//    for (size_t idx = 0; idx != raw_matches.size(); ++idx) {
-//      cv::DMatch best_match = raw_matches[idx][0];
-//      cv::DMatch second_best_match = raw_matches[idx][1];
-//
-//      if (best_match.distance < 0.45*second_best_match.distance) {
-//        ratio_matches.push_back(best_match);
-//      } else {
-//        new_descriptors.push_back(descriptor.row(best_match.queryIdx));
-//      }
-//    }
-//
-//    // See how good any of the new descriptors are by matching them against
-//    // themselves and only selecting those unique enough
-//    cv::Mat new_desc(new_descriptors.size(), new_descriptors[0].cols,
-//                     new_descriptors[0].type());
-//    for (size_t idx = 0; idx != new_descriptors.size(); ++idx) {
-//      new_desc.row(idx) = new_descriptors[idx];
-//    }
-//
-//    std::vector<std::vector<cv::DMatch>> new_raw_matches;
-//    matcher.knnMatch(new_desc, new_desc, new_raw_matches, 2);
-//
-//    // Use ratio matching
-//    MatVec good_new_descriptors;
-//    for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
-//      cv::DMatch best_match = new_raw_matches[idx][0];
-//      cv::DMatch second_best_match = new_raw_matches[idx][1];
-//
-//      if (best_match.distance < 0.45*second_best_match.distance) {
-//        good_new_descriptors.push_back(new_descriptors[best_match.queryIdx]);
-//        good_descriptors.push_back(new_descriptors[best_match.queryIdx]);
-//      }
-//    }
-//
-//    std::cout << "    Found " << good_new_descriptors.size() << " new descriptors" << std::endl;
+    cv::Mat cur_image = images[idx];
+    detdes_ptr->detectAndCompute(cur_image, mask, cur_keypoints,
+                                 cur_descriptor, false);
+
+    //std::cout << "Got " << cur_keypoints.size() << " keypoints" << std::endl;
+
+    //  cv::Mat color_image;
+    //  cv::cvtColor(cur_image, color_image, cv::COLOR_GRAY2RGB);
+    //  for (const auto &kp : cur_keypoints) {
+    //    cv::circle(color_image, kp.pt, 3, {0, 0, 255});
+    //  }
+    //  cv::imshow("image", color_image);
+    //  cv::waitKey(0);
+
+    cv::BFMatcher new_matcher;
+    std::vector<std::vector<cv::DMatch>> new_raw_matches;
+    new_matcher.knnMatch(cur_descriptor, prev_descriptor, new_raw_matches, 2);
+
+    // Use ratio matching to detect matches, and threshold to find new tracks
+    // starting
+    for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
+      cv::DMatch best_match = new_raw_matches[idx][0];
+      cv::DMatch second_best_match = new_raw_matches[idx][1];
+      assert(best_match.queryIdx == second_best_match.queryIdx);
+      assert(best_match.trainIdx != second_best_match.trainIdx);
+
+      KeyPointNode kpn;
+      kpn.keypoint = cur_keypoints[best_match.queryIdx];
+      kpn.keypoint.class_id = keypoint_counter++;
+      kpn.parent = -1;
+      kpn.leaf = true;
+
+      if (best_match.distance < 0.75 * second_best_match.distance) {
+        // Set best match as our parent
+        // Find the global index that matches the best match descriptor from
+        // the previous image as the parent
+        bool eq = false;
+        for (size_t pidx = 0; pidx != all_descriptors.size(); ++pidx) {
+          cv::Mat diff =
+            all_descriptors[pidx] != prev_descriptor.row(best_match.trainIdx);
+          eq = cv::countNonZero(diff) == 0;
+          if (eq) {
+            kpn.parent = pidx;
+            keypoint_nodes[pidx].leaf = false;
+            break;
+          }
+        }
+
+        if (!eq) {
+          // Found match was previously unknown because it did not pass the
+          // threshold test below, so add it first.
+          KeyPointNode kpn_prev;
+          kpn_prev.keypoint = prev_keypoints[best_match.trainIdx];
+          kpn_prev.leaf = false;
+          kpn_prev.parent = -1;
+//          keypoint_nodes.push_back(kpn_prev);
+//          all_descriptors.push_back(prev_descriptor.row(best_match.trainIdx));
+
+//          kpn.parent = keypoint_nodes.size() - 1;
+        } else {
+          all_descriptors.push_back(cur_descriptor.row(best_match.queryIdx));
+          keypoint_nodes.push_back(kpn);
+        }
+      } else if (best_match.distance > 650) {
+        // Start a new track
+        keypoint_nodes.push_back(kpn);
+        all_descriptors.push_back(cur_descriptor.row(best_match.queryIdx));
+      }
+    }
   }
 
-//  std::cout << "  Know of " << good_descriptors.size() << " descriptors" << std::endl;
-//
-//  // Pass 2 match them against all known "unique" descriptors
-//  std::cout << "  Pass 2" << std::endl;
-//  std::vector<std::vector<cv::DMatch>> raw_matches;
-//  matcher.clear();
-//  matcher.knnMatch(MatVecToMat(all_descriptors), MatVecToMat(good_descriptors),
-//                   raw_matches, 2);
-//
-//  std::cout << MatVecToMat(all_descriptors) << std::endl;
-//
-//  // Use ratio matching
-//  std::cout << "    Raw matches: " << raw_matches.size() << std::endl;
-//  std::map<int, KeyPointVec> feature_map;
-//  for (size_t idx = 0; idx != raw_matches.size(); ++idx) {
-//    cv::DMatch best_match = raw_matches[idx][0];
-//    cv::DMatch second_best_match = raw_matches[idx][1];
-//
-//    float ratio = float(best_match.distance) / second_best_match.distance;
-//    if (ratio < 0.45) {
-//      feature_map[best_match.trainIdx].push_back(all_keypoints[best_match.queryIdx]);
-//    }
-//  }
-//
-//  std::cout << "  Have " << feature_map.size() << " unique tracks" << std::endl;
-//  for (const auto &kv : feature_map) {
-//    std::cout << "    " << kv.second.size() << " points" << std::endl;
-//  }
+  // Paint the lines
+  cv::Mat color_image;
+  cv::cvtColor(images[0], color_image, cv::COLOR_GRAY2RGB);
+  for (size_t idx=0; idx != keypoint_nodes.size(); ++idx) {
+    KeyPointNode kpn = keypoint_nodes[idx];
+    size_t count = 0;
+    if (kpn.leaf) {
+      std::vector<cv::Point> points;
+      points.push_back(kpn.keypoint.pt);
+      while (kpn.parent >= 0) {
+        ++count;
+        kpn = keypoint_nodes[kpn.parent];
+        points.push_back(kpn.keypoint.pt);
+      }
+
+      if (count > 3) {
+        for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
+          cv::line(color_image, points[pidx], points[pidx+1], {100, 100, 255});
+          cv::circle(color_image, points[pidx], 1, {150, 150, 255});
+
+        }
+        cv::circle(color_image, kpn.keypoint.pt, 3, {0, 0, 255});
+
+      }
+    }
+  }
+
+  cv::imshow("image", color_image);
+  cv::waitKey(0);
 
   std::vector<std::array<double, 4>> motion_vecs;
 
-//  cv::Mat color_image;
-//  cv::cvtColor(image_1, color_image, cv::COLOR_GRAY2RGB);
-//  for (const auto &match : ratio_matches) {
-//    auto pt1 = keypoints_1[match.queryIdx].pt;
-//    auto pt2 = keypoints_2[match.trainIdx].pt;
-//    cv::circle(color_image, pt1, 3, {0, 0, 255});
-//    cv::line(color_image, pt1, pt2, {0, 0, 255});
-//    if (std::abs(pt2.x - pt1.x) > 4) {
-//      motion_vecs.push_back({{pt1.x, pt1.y, pt2.x-pt1.x, pt2.y-pt1.y}});
-//    }
-//  }
-//  cv::imshow("image", color_image);
+  //  cv::Mat color_image;
+  //  cv::cvtColor(image_1, color_image, cv::COLOR_GRAY2RGB);
+  //  for (const auto &match : ratio_matches) {
+  //    auto pt1 = keypoints_1[match.queryIdx].pt;
+  //    auto pt2 = keypoints_2[match.trainIdx].pt;
+  //    cv::circle(color_image, pt1, 3, {0, 0, 255});
+  //    cv::line(color_image, pt1, pt2, {0, 0, 255});
+  //    if (std::abs(pt2.x - pt1.x) > 4) {
+  //      motion_vecs.push_back({{pt1.x, pt1.y, pt2.x-pt1.x, pt2.y-pt1.y}});
+  //    }
+  //  }
+  //  cv::imshow("image", color_image);
 
   gimx.SendControl(XboneControl());
 
@@ -563,18 +637,18 @@ int main (int argc, char **argv) {
     mpl.SendData(np_data);
   };
 
-//  auto sendVec = [&] (const std::vector<double> &vec, const std::string &name) {
-//    mpl.SendData(NumpyArray(name, vec));
-//  };
+  //  auto sendVec = [&] (const std::vector<double> &vec, const std::string &name) {
+  //    mpl.SendData(NumpyArray(name, vec));
+  //  };
 
   std::vector<std::array<double, 2>> feature_points;
-//  for (const auto &kv : feature_map) {
-//    for (const auto &keypoint : kv.second) {
-//      feature_points.push_back({{keypoint.pt.x, keypoint.pt.y}});
-//    }
-//  }
-  for (const auto &keypoint : all_keypoints) {
-    feature_points.push_back({{keypoint.pt.x, keypoint.pt.y}});
+  //  for (const auto &kv : feature_map) {
+  //    for (const auto &keypoint : kv.second) {
+  //      feature_points.push_back({{keypoint.pt.x, keypoint.pt.y}});
+  //    }
+  //  }
+  for (const auto &kpn : keypoint_nodes) {
+    feature_points.push_back({{kpn.keypoint.pt.x, kpn.keypoint.pt.y}});
   }
 
   mpl.SendData(NumpyArray("points", (double*)feature_points.data(),
