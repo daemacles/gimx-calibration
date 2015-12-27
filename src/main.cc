@@ -48,6 +48,8 @@ typedef std::vector<cv::KeyPoint> KeyPointVec;
 cppmpl::CppMatplotlib MplConnect (std::string config_path);
 
 constexpr uint32_t GIMX_UDP_BUF_SIZE = 158;
+constexpr double DISTANCE_THRESHOLD = 750.0;
+constexpr double RATIO_THRESHOLD = 75.0;
 std::string MASK_IMAGE_FILE = "/tmp/mask.png";
 
 
@@ -219,16 +221,23 @@ public:
       std::cout << "capture error" << std::endl;
     }
 
-    //     // convert to rgb
-    //    Image rgbImage;
-    //    rgbImage.SetColorProcessing(IPP);
-    //    rawImage.Convert( FlyCapture2::PIXEL_FORMAT_BGR, &rgbImage );
-
-    // Convert to OpenCV Mat
-    cv::Mat tmp_image = cv::Mat(rawImage.GetRows(), rawImage.GetCols(),
-                                CV_8UC1, rawImage.GetData(),
-                                rawImage.GetStride());
+    cv::Mat tmp_image;
+    if (rawImage.GetPixelFormat() == fc::PIXEL_FORMAT_RAW8) {
+     // convert to rgb
+      fc::Image rgbImage;
+      rgbImage.SetColorProcessing(fc::IPP);
+      rawImage.Convert(fc::PIXEL_FORMAT_BGR, &rgbImage);
+      tmp_image = cv::Mat(rgbImage.GetRows(), rgbImage.GetCols(), CV_8UC3,
+                          rgbImage.GetData(), rgbImage.GetStride());
+      cv::cvtColor(tmp_image, tmp_image, cv::COLOR_BGR2GRAY);
+    } else {
+      // Convert to OpenCV Mat
+      tmp_image = cv::Mat(rawImage.GetRows(), rawImage.GetCols(), CV_8UC1,
+                          rawImage.GetData(), rawImage.GetStride());
+    }
+    // Grab window subset
     //cv::Mat image(tmp_image, cv::Rect(10, 110, 620, 60));
+
     cv::Mat image;
     cv::resize(tmp_image, image, cv::Size(0, 0), SCALE, SCALE, cv::INTER_CUBIC);
     return image;
@@ -265,50 +274,65 @@ cppmpl::CppMatplotlib MplConnect (std::string config_path="") {
 
 
 namespace std {
+template<> struct equal_to<cv::Mat> {
+  bool operator()(const cv::Mat& A, const cv::Mat& B) const {
+    assert(A.rows == B.rows);
+    assert(A.cols == B.cols);
+    assert(A.type() == B.type());
+    cv::Mat diff = A != B;
+    return cv::countNonZero(diff) == 0;
+  }
+};
+
+template<> struct hash<cv::Mat> {
+  size_t operator()(const cv::Mat& A) const {
+    return (size_t)A.data;
+  }
+};
+
 // This specialization lets us use descriptors as keys in a map
-template<>
-struct less<cv::Mat> {
-   bool operator()(const cv::Mat& A, const cv::Mat& B) const {
-     assert(A.rows == B.rows);
-     assert(A.cols == B.cols);
-     assert(A.type() == B.type());
-     assert(A.channels() == 1);
-     assert(B.channels() == 1);
+template<> struct less<cv::Mat> {
+  bool operator()(const cv::Mat& A, const cv::Mat& B) const {
+    assert(A.rows == B.rows);
+    assert(A.cols == B.cols);
+    assert(A.type() == B.type());
+    assert(A.channels() == 1);
+    assert(B.channels() == 1);
 
-     for (int row = 0; row != A.rows; ++row) {
-       for (int col = 0; col != A.cols; ++col) {
-         switch (A.type()) {
-         case CV_32F:
-           if (A.at<float>(row, col) > B.at<float>(row, col))
-             return false;
-           if (A.at<float>(row, col) < B.at<float>(row, col))
-             return true;
-           break;
+    for (int row = 0; row != A.rows; ++row) {
+      for (int col = 0; col != A.cols; ++col) {
+        switch (A.type()) {
+        case CV_32F:
+          if (A.at<float>(row, col) > B.at<float>(row, col))
+            return false;
+          if (A.at<float>(row, col) < B.at<float>(row, col))
+            return true;
+          break;
 
-         case CV_64F:
-           if (A.at<double>(row, col) > B.at<double>(row, col))
-             return false;
-           if (A.at<double>(row, col) < B.at<double>(row, col))
-             return true;
-           break;
+        case CV_64F:
+          if (A.at<double>(row, col) > B.at<double>(row, col))
+            return false;
+          if (A.at<double>(row, col) < B.at<double>(row, col))
+            return true;
+          break;
 
-         case CV_8UC1:
-           if (A.at<uint8_t>(row, col) > B.at<uint8_t>(row, col))
-             return false;
-           if (A.at<uint8_t>(row, col) < B.at<uint8_t>(row, col))
-             return true;
-           break;
+        case CV_8UC1:
+          if (A.at<uint8_t>(row, col) > B.at<uint8_t>(row, col))
+            return false;
+          if (A.at<uint8_t>(row, col) < B.at<uint8_t>(row, col))
+            return true;
+          break;
 
-         default:
-           throw std::runtime_error("Unsupported type");
-           break;
-         }
-       }
-     }
+        default:
+          throw std::runtime_error("Unsupported type");
+          break;
+        }
+      }
+    }
 
-     // All elements equal, but say we're less to avoid loops?
-     return true;
-   }
+    // All elements equal, but say we're less to avoid loops?
+    return true;
+  }
 };
 }
 
@@ -336,7 +360,7 @@ void GetGoodDescriptors (cv::InputArray descriptors,
                          KeyPointVec &keypoints,
                          cv::OutputArray good_descriptors,
                          KeyPointVec &good_keypoints,
-                         double min_distance=650.00
+                         double min_distance=DISTANCE_THRESHOLD
                          ) {
   cv::BFMatcher new_matcher;
   std::vector<std::vector<cv::DMatch>> new_raw_matches;
@@ -353,6 +377,7 @@ void GetGoodDescriptors (cv::InputArray descriptors,
 
     //if (best_match.distance < ratio * second_best_match.distance) {
     if (best_match.distance > min_distance) {
+      std::cout << best_match.distance << std::endl;
       descriptors_vec.push_back(descriptors_tmp.row(best_match.queryIdx));
       good_keypoints.push_back(keypoints_tmp[best_match.queryIdx]);
     }
@@ -363,6 +388,8 @@ void GetGoodDescriptors (cv::InputArray descriptors,
   for (size_t idx = 0; idx != descriptors_vec.size(); ++idx) {
     output_mat.row(idx) = descriptors_vec[idx];
   }
+  std::cout << "Got " << good_keypoints.size() << " keypoints "
+    << "(down from " << keypoints_tmp.size() << ")" << std::endl;
 }
 
 
@@ -487,10 +514,16 @@ int main (int argc, char **argv) {
                                cur_descriptor, false);
 
   GetGoodDescriptors(cur_descriptor, cur_keypoints, cur_descriptor, cur_keypoints);
-  //std::cout << "Got " << cur_keypoints.size() << " keypoints" << std::endl;
+
+  MatVec prev_descriptor;
+  KeyPointVec prev_keypoints;
 
   for (int row = 0; row != cur_descriptor.rows; ++row) {
     all_descriptors.push_back(cur_descriptor.row(row).clone());
+
+    prev_descriptor.push_back(cur_descriptor.row(row).clone());
+    prev_keypoints.push_back(cur_keypoints[row]);
+
     KeyPointNode kpn;
     kpn.keypoint = cur_keypoints[row];
     kpn.keypoint.class_id = keypoint_counter++;
@@ -502,30 +535,21 @@ int main (int argc, char **argv) {
 
 
   // Track successive keypoints
+  std::cout << "Finding tracks" << std::endl;
   for (size_t idx=1; idx != images.size(); ++idx) {
-    cv::Mat prev_descriptor = cur_descriptor.clone();
-    cur_descriptor = cv::Mat();
+    std::cout << "  Processing image " << idx << std::endl;
 
-    KeyPointVec prev_keypoints(cur_keypoints);
+    cur_descriptor = cv::Mat();
     cur_keypoints.clear();
 
     cv::Mat cur_image = images[idx];
     detdes_ptr->detectAndCompute(cur_image, mask, cur_keypoints,
                                  cur_descriptor, false);
 
-    //std::cout << "Got " << cur_keypoints.size() << " keypoints" << std::endl;
-
-    //  cv::Mat color_image;
-    //  cv::cvtColor(cur_image, color_image, cv::COLOR_GRAY2RGB);
-    //  for (const auto &kp : cur_keypoints) {
-    //    cv::circle(color_image, kp.pt, 3, {0, 0, 255});
-    //  }
-    //  cv::imshow("image", color_image);
-    //  cv::waitKey(0);
-
     cv::BFMatcher new_matcher;
     std::vector<std::vector<cv::DMatch>> new_raw_matches;
-    new_matcher.knnMatch(cur_descriptor, prev_descriptor, new_raw_matches, 2);
+    new_matcher.knnMatch(cur_descriptor, MatVecToMat(prev_descriptor),
+                         new_raw_matches, 2);
 
     // Use ratio matching to detect matches, and threshold to find new tracks
     // starting
@@ -541,14 +565,14 @@ int main (int argc, char **argv) {
       kpn.parent = -1;
       kpn.leaf = true;
 
-      if (best_match.distance < 0.75 * second_best_match.distance) {
+      if (best_match.distance < RATIO_THRESHOLD * second_best_match.distance) {
         // Set best match as our parent
         // Find the global index that matches the best match descriptor from
         // the previous image as the parent
         bool eq = false;
         for (size_t pidx = 0; pidx != all_descriptors.size(); ++pidx) {
           cv::Mat diff =
-            all_descriptors[pidx] != prev_descriptor.row(best_match.trainIdx);
+            all_descriptors[pidx] != prev_descriptor[best_match.trainIdx];
           eq = cv::countNonZero(diff) == 0;
           if (eq) {
             kpn.parent = pidx;
@@ -569,13 +593,22 @@ int main (int argc, char **argv) {
 
 //          kpn.parent = keypoint_nodes.size() - 1;
         } else {
-          all_descriptors.push_back(cur_descriptor.row(best_match.queryIdx));
+          int row = best_match.queryIdx;
+          all_descriptors.push_back(cur_descriptor.row(row));
           keypoint_nodes.push_back(kpn);
+
+          prev_descriptor.push_back(cur_descriptor.row(row).clone());
+          prev_keypoints.push_back(cur_keypoints[row]);
         }
-      } else if (best_match.distance > 650) {
-        // Start a new track
+      } else if (best_match.distance > DISTANCE_THRESHOLD) {
+        // Didn't find a match, but this is a good keypoint on its own, so
+        // start a new track.
+        int row = best_match.queryIdx;
         keypoint_nodes.push_back(kpn);
-        all_descriptors.push_back(cur_descriptor.row(best_match.queryIdx));
+        all_descriptors.push_back(cur_descriptor.row(row));
+
+        prev_descriptor.push_back(cur_descriptor.row(row).clone());
+        prev_keypoints.push_back(cur_keypoints[row]);
       }
     }
   }
@@ -595,14 +628,13 @@ int main (int argc, char **argv) {
         points.push_back(kpn.keypoint.pt);
       }
 
-      if (count > 3) {
+      if (count > 0) {
         for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
           cv::line(color_image, points[pidx], points[pidx+1], {100, 100, 255});
           cv::circle(color_image, points[pidx], 1, {150, 150, 255});
 
         }
-        cv::circle(color_image, kpn.keypoint.pt, 3, {0, 0, 255});
-
+        cv::circle(color_image, points.back(), 3, {0, 0, 255});
       }
     }
   }
@@ -637,9 +669,16 @@ int main (int argc, char **argv) {
     mpl.SendData(np_data);
   };
 
-  //  auto sendVec = [&] (const std::vector<double> &vec, const std::string &name) {
-  //    mpl.SendData(NumpyArray(name, vec));
-  //  };
+  auto sendVec = [&] (const std::vector<double> &vec,
+                      const std::string &name) {
+    mpl.SendData(NumpyArray(name, vec));
+  };
+
+  std::vector<double> distances;
+  for (const auto &kpn : keypoint_nodes) {
+    distances.push_back(kpn.keypoint.response);
+  }
+  sendVec(distances, "distances");
 
   std::vector<std::array<double, 2>> feature_points;
   //  for (const auto &kv : feature_map) {
