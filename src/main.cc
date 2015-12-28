@@ -52,7 +52,7 @@ cppmpl::CppMatplotlib MplConnect (std::string config_path);
 
 constexpr uint32_t GIMX_UDP_BUF_SIZE = 158;
 constexpr double DISTANCE_THRESHOLD = 750.0;
-constexpr double RATIO_THRESHOLD = 0.75;
+constexpr double RATIO_THRESHOLD = 0.65;
 std::string MASK_IMAGE_FILE = "/tmp/mask.png";
 
 
@@ -616,8 +616,8 @@ int main (int argc, char **argv) {
 
         kpn_map[query_keypoint.class_id] = kpn;
       } else {
-        std::cout << best_match.distance <<
-         " " << second_best_match.distance << std::endl;
+//        std::cout << best_match.distance <<
+//         " " << second_best_match.distance << std::endl;
       }
     }
 
@@ -664,7 +664,7 @@ int main (int argc, char **argv) {
         points.push_back(kpn.keypoint.pt);
       }
 
-      if (count > 0) {
+      if (count > 4) {
         for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
           cv::line(color_image, points[pidx], points[pidx+1], {100, 100, 255});
           cv::circle(color_image, points[pidx], 1, {150, 150, 255});
