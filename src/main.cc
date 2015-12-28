@@ -360,7 +360,7 @@ template<> struct equal_to<cv::KeyPoint> {
 
 struct KeyPointNode {
   cv::KeyPoint keypoint;
-  cv::Mat parent;
+  int parent;
   bool leaf;
 };
 
@@ -527,7 +527,7 @@ int main (int argc, char **argv) {
   std::cout << "Extracting feature tracks" << std::endl;
 
   int keypoint_counter = 0;
-  std::unordered_map<cv::Mat, KeyPointNode> kpn_map;
+  std::unordered_map<int, KeyPointNode> kpn_map;
 
   cv::Mat cur_image = images[0];
 
@@ -545,8 +545,8 @@ int main (int argc, char **argv) {
     KeyPointNode kpn;
     kpn.keypoint = cur_keypoints[row];
     kpn.leaf = true;
-    kpn.parent = cv::Mat();
-    kpn_map[cur_descriptors.row(row).clone()] = kpn;
+    kpn.parent = -1;
+    kpn_map[kpn.keypoint.class_id] = kpn;
   }
 
   // Track successive keypoints
@@ -591,7 +591,8 @@ int main (int argc, char **argv) {
       if (best_match.distance < RATIO_THRESHOLD * second_best_match.distance) {
         cv::Mat train_desc = cur_descriptors.row(best_match.trainIdx);
         cv::Mat query_desc = next_descriptors.row(best_match.queryIdx);
-        cv::KeyPoint query_keypoint = next_keypoints[best_match.queryIdx];
+        cv::KeyPoint &train_keypoint = cur_keypoints[best_match.trainIdx];
+        cv::KeyPoint &query_keypoint = next_keypoints[best_match.queryIdx];
 
         track_descriptors.push_back(query_desc);
         track_keypoints.push_back(query_keypoint);
@@ -602,17 +603,18 @@ int main (int argc, char **argv) {
 //        std::cout << " --> " << next_descriptors_set.size()
 //          << "  " << float(best_match.distance) / second_best_match.distance << std::endl;
 
-        auto& kpn_parent = kpn_map[train_desc];
+        auto& kpn_parent = kpn_map[train_keypoint.class_id];
         kpn_parent.leaf = false;
 
         // Set best match as our parent
+        query_keypoint.class_id = keypoint_counter++;
         KeyPointNode kpn;
         kpn.keypoint = query_keypoint;
         kpn.keypoint.class_id = keypoint_counter++;
-        kpn.parent = train_desc.clone();
+        kpn.parent = train_keypoint.class_id;
         kpn.leaf = true;
 
-        kpn_map[query_desc] = kpn;
+        kpn_map[query_keypoint.class_id] = kpn;
       } else {
         std::cout << best_match.distance <<
          " " << second_best_match.distance << std::endl;
@@ -641,26 +643,22 @@ int main (int argc, char **argv) {
   cv::cvtColor(images[0], color_image, cv::COLOR_GRAY2RGB);
   for (const auto& kv : kpn_map) {
     KeyPointNode kpn = kv.second;
-    MatSet seen_points;
-    seen_points.insert(kv.first);
     size_t count = 0;
     if (kpn.leaf) {
       std::vector<cv::Point> points;
       points.push_back(kpn.keypoint.pt);
-      while (kpn.parent.rows != 0) {
+      while (kpn.parent >= 0) {
         ++count;
         auto next_kpn = kpn_map.at(kpn.parent);
 
-        // Detect loops
-        if (seen_points.count(kpn.parent)) {
-//        if (kpn.parent.rows == next_kpn.parent.rows &&
-//            std::equal_to<cv::Mat>()(kpn.parent, next_kpn.parent)) {
-          std::cout << "Loop detected" << std::endl;
-          count = 0;
-          break;
-        }
-
-        seen_points.insert(kpn.parent);
+//        // Detect loops
+//        if (seen_points.count(kpn.parent)) {
+////        if (kpn.parent.rows == next_kpn.parent.rows &&
+////            std::equal_to<cv::Mat>()(kpn.parent, next_kpn.parent)) {
+//          std::cout << "Loop detected" << std::endl;
+//          count = 0;
+//          break;
+//        }
 
         kpn = next_kpn;
         points.push_back(kpn.keypoint.pt);
