@@ -169,6 +169,8 @@ private:
 namespace fc = FlyCapture2;
 class Flea3 {
 public:
+  typedef std::shared_ptr<Flea3> ptr_t;
+
   Flea3 () {
   }
 
@@ -256,6 +258,10 @@ public:
     cv::Mat image = GetImage();
     image.convertTo(image, CV_32F);
     return image;
+  }
+
+  static std::shared_ptr<Flea3> GetInstance (void) {
+    return std::make_shared<Flea3>();
   }
 
 private:
@@ -422,6 +428,267 @@ void GetGoodDescriptors (cv::InputArray descriptors,
 }
 
 
+class Measure {
+public:
+  typedef std::unordered_map<int, KeyPointNode> KpnMap;
+
+  Measure (GimxConnection gimx, Flea3::ptr_t flea3_p) :
+      gimx_(gimx),
+      flea3_p_(flea3_p),
+      metadata_(10)
+  {
+    gimx_.Connect();
+  }
+
+  MatVec GetImages (size_t N) {
+    // capture loop
+    char key = 0;
+    struct timeval prev_time;
+    gettimeofday(&prev_time, NULL);
+    double diff_us = 0;
+    double counter = 0;
+    MatVec images;
+
+    XboneControl ctl;
+    ctl.right_stick.x = 29250;
+    gimx_.SendControl(ctl);
+    usleep(1.0e6);
+
+    uint32_t frame_count = 0;
+    uint32_t last_frame_count = 0;
+    for (size_t capture_count = 0; key != 'q' && capture_count < N;
+         ++capture_count) {
+      struct timeval time;
+      gettimeofday(&time, NULL);
+      diff_us = 0.5 * diff_us +
+        0.5 * ((time.tv_usec + 1000000 * time.tv_sec) -
+               (prev_time.tv_usec + 1000000 * prev_time.tv_sec));
+      prev_time = time;
+      std::cout << "Period: " << 1e6 / diff_us << "Hz" << std::endl;
+      counter += diff_us / 1e6;
+
+      // Get the image
+      cv::Mat image = flea3_p_->GetImage();
+      images.push_back(image);
+      cv::imshow(WINDOW, image);
+      key = cv::waitKey(1) & 0xff;
+      uint32_t* embedded_info = (uint32_t*)image.data;
+      last_frame_count = frame_count;
+      frame_count = embedded_info[1];
+
+      // Skip some frames -- keeps timing accurate
+      for (size_t skips = 0; skips != 0; --skips) {
+        flea3_p_->GetImage();
+      }
+    }
+    metadata_[0] = frame_count - last_frame_count;
+
+    ctl.right_stick.x = 0;
+    gimx_.SendControl(ctl);
+
+    return images;
+  }
+
+  KpnMap ProcessImages (MatVec &images) {
+    // Now extract feature tracks
+    // Pass 1, figure out all descriptors of interest.
+    std::cout << "Extracting feature tracks" << std::endl;
+
+    int keypoint_counter = 0;
+    KpnMap kpn_map;
+
+    cv::Mat cur_image = images[0];
+
+    auto detdes_ptr = cv::BRISK::create();
+    cv::Mat cur_descriptors;
+    KeyPointVec cur_keypoints;
+    detdes_ptr->detectAndCompute(cur_image, GetMask(), cur_keypoints,
+                                 cur_descriptors, false);
+    cur_descriptors.convertTo(cur_descriptors, CV_32F);
+
+    //  GetGoodDescriptors(cur_descriptors, cur_keypoints,
+    //                     cur_descriptors, cur_keypoints);
+
+    for (int row = 0; row != cur_descriptors.rows; ++row) {
+      cur_keypoints[row].class_id = keypoint_counter++;
+      KeyPointNode kpn;
+      kpn.keypoint = cur_keypoints[row];
+      kpn.leaf = true;
+      kpn.parent = -1;
+      kpn_map[kpn.keypoint.class_id] = kpn;
+    }
+
+    // Track successive keypoints
+    std::cout << "Finding tracks" << std::endl;
+    for (size_t idx=1; idx != images.size(); ++idx) {
+      std::cout << "  Processing image " << idx << std::endl;
+      cur_image = images[idx];
+
+      cv::Mat next_descriptors;
+      KeyPointVec next_keypoints;
+      detdes_ptr->detectAndCompute(cur_image, GetMask(), next_keypoints,
+                                   next_descriptors, false);
+      next_descriptors.convertTo(next_descriptors, CV_32F);
+
+      MatSet next_descriptors_set;
+      for (int row=0; row != next_descriptors.rows; ++row) {
+        next_descriptors_set.insert(next_descriptors.row(row));
+      }
+      KeyPointSet next_keypoints_set(next_keypoints.begin(),
+                                     next_keypoints.end());
+
+      // Use ratio matching to detect matches, and threshold to find new tracks
+      // starting
+      cv::BFMatcher new_matcher;
+      std::vector<std::vector<cv::DMatch>> new_raw_matches;
+      new_matcher.knnMatch(next_descriptors, cur_descriptors,
+                           new_raw_matches, 4);
+
+      MatVec track_descriptors;
+      KeyPointVec track_keypoints;
+      for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
+
+        cv::DMatch best_match = new_raw_matches[idx][0];
+        cv::DMatch second_best_match = new_raw_matches[idx][1];
+        assert(best_match.queryIdx == second_best_match.queryIdx);
+        assert(best_match.trainIdx != second_best_match.trainIdx);
+
+        if (best_match.distance < RATIO_THRESHOLD * second_best_match.distance) {
+          cv::Mat train_desc = cur_descriptors.row(best_match.trainIdx);
+          cv::Mat query_desc = next_descriptors.row(best_match.queryIdx);
+          cv::KeyPoint &train_keypoint = cur_keypoints[best_match.trainIdx];
+          cv::KeyPoint &query_keypoint = next_keypoints[best_match.queryIdx];
+
+          track_descriptors.push_back(query_desc);
+          track_keypoints.push_back(query_keypoint);
+
+          next_descriptors_set.erase(query_desc);
+          next_keypoints_set.erase(query_keypoint);
+
+          auto& kpn_parent = kpn_map[train_keypoint.class_id];
+          kpn_parent.leaf = false;
+
+          // Set best match as our parent
+          query_keypoint.class_id = keypoint_counter++;
+          KeyPointNode kpn;
+          kpn.keypoint = query_keypoint;
+          kpn.keypoint.class_id = keypoint_counter++;
+          kpn.parent = train_keypoint.class_id;
+          kpn.leaf = true;
+
+          kpn_map[query_keypoint.class_id] = kpn;
+        } else {
+          //        std::cout << best_match.distance <<
+          //         " " << second_best_match.distance << std::endl;
+        }
+      }
+
+      //    MatVec nd (next_descriptors_set.begin(), next_descriptors_set.end());
+      //    next_descriptors = MatVecToMat(nd);
+      //
+      //    next_keypoints = KeyPointVec(next_keypoints_set.begin(),
+      //                                 next_keypoints_set.end());
+      ////    GetGoodDescriptors(next_descriptors, next_keypoints,
+      ////                       next_descriptors, next_keypoints);
+      //
+      //    // Union
+      //    next_descriptors.push_back(MatVecToMat(track_descriptors));
+      cur_descriptors = next_descriptors.clone();
+
+      //    next_keypoints.insert(next_keypoints.end(), track_keypoints.begin(),
+      //                          track_keypoints.end());
+      cur_keypoints = next_keypoints;
+    }
+    return kpn_map;
+  }
+
+  cv::Mat GetMask (void) {
+    if (mask_.rows != 0) {
+      return mask_;
+    }
+
+    cv::Mat mask;
+    if (!FileExists(MASK_IMAGE_FILE)) {
+      // Compute mask
+      std::cout << "Creating motion mask. Takes about 10 seconds." << std::endl;
+      XboneControl ctl;
+      ctl.right_stick.x = 25000;
+      gimx_.SendControl(ctl);
+
+      MatVec mask_images;
+      for (size_t capture_count = 0; capture_count != 600; ++capture_count) {
+        mask_images.push_back(flea3_p_->GetImageFloat() / 255.0);
+        cv::imshow(WINDOW, mask_images.back());
+        cv::waitKey(1);
+        for (size_t skip_count = 0; skip_count != 0; ++skip_count) {
+          flea3_p_->GetImage();
+        }
+      }
+
+      ctl.right_stick.x = 0;
+      gimx_.SendControl(ctl);
+
+      // Deltas between successive mask_images
+      std::cout << "  Computing deltas" << std::endl;
+      MatVec diffs;
+      cv::Mat mean_diff = mask_images[0].clone() * 0;
+      for (size_t idx = 1; idx != mask_images.size(); ++idx) {
+        cv::Mat diff = mask_images[idx] - mask_images[idx-1];
+        mean_diff += diff;
+        diffs.push_back(diff);
+      }
+      mean_diff /= diffs.size();
+
+      // Stdev of the deltas
+      std::cout << "  Computing stdev" << std::endl;
+      cv::Mat std_diff = diffs[0].clone() * 0;
+      for (size_t idx = 0; idx != diffs.size(); ++idx) {
+        cv::Mat deviation = diffs[idx] - mean_diff;
+        std_diff += deviation.mul(deviation);
+      }
+      cv::sqrt(std_diff / diffs.size(), std_diff);
+      double min, max;
+      cv::minMaxLoc(std_diff, &min, &max);
+      std_diff = (std_diff - min) / (max - min);
+
+      // Create the mask
+      cv::GaussianBlur(std_diff, mask, cv::Size(0, 0), 1.0);
+      cv::threshold(mask, mask, 0.25, 1.0, cv::THRESH_BINARY);
+      cv::erode(mask, mask, cv::getStructuringElement(cv::MORPH_RECT,
+                                                      cv::Size(3, 3)),
+                cv::Point(-1, -1), 8);
+      mask *= 255;
+      mask.convertTo(mask, CV_8UC1);
+
+      cv::imwrite(MASK_IMAGE_FILE, mask);
+
+      cv::imshow(WINDOW, mask);
+      cv::waitKey(0);
+    } else {
+      mask = cv::imread(MASK_IMAGE_FILE);
+      cv::cvtColor(mask, mask, cv::COLOR_BGR2GRAY);
+      std::cout << "Using mask from " << MASK_IMAGE_FILE
+        << ". Delete to recreate mask anew." << std::endl;
+    }
+
+    mask_ = mask;
+    return mask;
+  }
+
+  std::vector<double> GetMetadata (void) {
+    return metadata_;
+  }
+
+private:
+  GimxConnection gimx_;
+  Flea3::ptr_t flea3_p_;
+  cv::Mat mask_;
+
+  // 0 - frames between captures
+  std::vector<double> metadata_;
+};
+
+
 int main (int argc, char **argv) {
   (void) argc;
   (void) argv;
@@ -429,233 +696,18 @@ int main (int argc, char **argv) {
   GimxConnection gimx("localhost", 7799);
   gimx.Connect();
 
-  Flea3 flea3;
-  if (!flea3.Connect()) {
+  Flea3::ptr_t flea3_p = Flea3::GetInstance();
+  if (!flea3_p->Connect()) {
     std::cerr << "Couldn't connect to camera" << std::endl;
     std::exit(1);
   }
 
-  flea3.GetImage();
+  flea3_p->GetImage();
 
-  cv::Mat mask;
-  if (!FileExists(MASK_IMAGE_FILE)) {
-    // Compute mask
-    std::cout << "Creating motion mask. Takes about 10 seconds." << std::endl;
-    XboneControl ctl;
-    ctl.right_stick.x = 25000;
-    gimx.SendControl(ctl);
+  Measure measure(gimx, flea3_p);
 
-    MatVec mask_images;
-    for (size_t capture_count = 0; capture_count != 600; ++capture_count) {
-      mask_images.push_back(flea3.GetImageFloat() / 255.0);
-      cv::imshow(WINDOW, mask_images.back());
-      cv::waitKey(1);
-      for (size_t skip_count = 0; skip_count != 0; ++skip_count) {
-        flea3.GetImage();
-      }
-    }
-
-    ctl.right_stick.x = 0;
-    gimx.SendControl(ctl);
-
-    // Deltas between successive mask_images
-    std::cout << "  Computing deltas" << std::endl;
-    MatVec diffs;
-    cv::Mat mean_diff = mask_images[0].clone() * 0;
-    for (size_t idx = 1; idx != mask_images.size(); ++idx) {
-      cv::Mat diff = mask_images[idx] - mask_images[idx-1];
-      mean_diff += diff;
-      diffs.push_back(diff);
-    }
-    mean_diff /= diffs.size();
-
-    // Stdev of the deltas
-    std::cout << "  Computing stdev" << std::endl;
-    cv::Mat std_diff = diffs[0].clone() * 0;
-    for (size_t idx = 0; idx != diffs.size(); ++idx) {
-      cv::Mat deviation = diffs[idx] - mean_diff;
-      std_diff += deviation.mul(deviation);
-    }
-    cv::sqrt(std_diff / diffs.size(), std_diff);
-    double min, max;
-    cv::minMaxLoc(std_diff, &min, &max);
-    std_diff = (std_diff - min) / (max - min);
-
-    // Create the mask
-    cv::GaussianBlur(std_diff, mask, cv::Size(0, 0), 1.0);
-    cv::threshold(mask, mask, 0.25, 1.0, cv::THRESH_BINARY);
-    cv::erode(mask, mask, cv::getStructuringElement(cv::MORPH_RECT,
-                                                    cv::Size(3, 3)),
-              cv::Point(-1, -1), 8);
-    mask *= 255;
-    mask.convertTo(mask, CV_8UC1);
-
-    cv::imwrite(MASK_IMAGE_FILE, mask);
-
-    cv::imshow(WINDOW, mask);
-    cv::waitKey(0);
-  } else {
-    mask = cv::imread(MASK_IMAGE_FILE);
-    cv::cvtColor(mask, mask, cv::COLOR_BGR2GRAY);
-    std::cout << "Using mask from " << MASK_IMAGE_FILE
-      << ". Delete to recreate mask anew." << std::endl;
-  }
-
-  // capture loop
-  char key = 0;
-  struct timeval prev_time;
-  gettimeofday(&prev_time, NULL);
-  double diff_us = 0;
-  double counter = 0;
-  auto detdes_ptr = cv::BRISK::create();
-  MatVec images;
-
-  XboneControl ctl;
-  ctl.right_stick.x = 29250;
-  gimx.SendControl(ctl);
-  usleep(1.0e6);
-
-  uint32_t frame_count = 0;
-  uint32_t last_frame_count = 0;
-  for (size_t capture_count = 0; key != 'q' && capture_count < 50;
-       ++capture_count) {
-    struct timeval time;
-    gettimeofday(&time, NULL);
-    diff_us = 0.5 * diff_us +
-      0.5 * ((time.tv_usec + 1000000 * time.tv_sec) -
-             (prev_time.tv_usec + 1000000 * prev_time.tv_sec));
-    prev_time = time;
-    std::cout << "Period: " << 1e6 / diff_us << "Hz" << std::endl;
-    counter += diff_us / 1e6;
-
-    // Get the image
-    cv::Mat image = flea3.GetImage();
-    images.push_back(image);
-    cv::imshow(WINDOW, image);
-    key = cv::waitKey(1) & 0xff;
-    uint32_t* embedded_info = (uint32_t*)image.data;
-    last_frame_count = frame_count;
-    frame_count = embedded_info[1];
-
-    // Skip some frames -- keeps timing accurate
-    for (size_t skips = 0; skips != 0; --skips) {
-      flea3.GetImage();
-    }
-  }
-  std::vector<double> metadata;
-  metadata.push_back(frame_count - last_frame_count);
-
-  ctl.right_stick.x = 0;
-  gimx.SendControl(ctl);
-
-  // Now extract feature tracks
-  // Pass 1, figure out all descriptors of interest.
-  std::cout << "Extracting feature tracks" << std::endl;
-
-  int keypoint_counter = 0;
-  std::unordered_map<int, KeyPointNode> kpn_map;
-
-  cv::Mat cur_image = images[0];
-
-  cv::Mat cur_descriptors;
-  KeyPointVec cur_keypoints;
-  detdes_ptr->detectAndCompute(cur_image, mask, cur_keypoints,
-                               cur_descriptors, false);
-  cur_descriptors.convertTo(cur_descriptors, CV_32F);
-
-//  GetGoodDescriptors(cur_descriptors, cur_keypoints,
-//                     cur_descriptors, cur_keypoints);
-
-  for (int row = 0; row != cur_descriptors.rows; ++row) {
-    cur_keypoints[row].class_id = keypoint_counter++;
-    KeyPointNode kpn;
-    kpn.keypoint = cur_keypoints[row];
-    kpn.leaf = true;
-    kpn.parent = -1;
-    kpn_map[kpn.keypoint.class_id] = kpn;
-  }
-
-  // Track successive keypoints
-  std::cout << "Finding tracks" << std::endl;
-  for (size_t idx=1; idx != images.size(); ++idx) {
-    std::cout << "  Processing image " << idx << std::endl;
-    cur_image = images[idx];
-
-    cv::Mat next_descriptors;
-    KeyPointVec next_keypoints;
-    detdes_ptr->detectAndCompute(cur_image, mask, next_keypoints,
-                                 next_descriptors, false);
-    next_descriptors.convertTo(next_descriptors, CV_32F);
-
-    MatSet next_descriptors_set;
-    for (int row=0; row != next_descriptors.rows; ++row) {
-      next_descriptors_set.insert(next_descriptors.row(row));
-    }
-    KeyPointSet next_keypoints_set(next_keypoints.begin(),
-                                   next_keypoints.end());
-
-    // Use ratio matching to detect matches, and threshold to find new tracks
-    // starting
-    cv::BFMatcher new_matcher;
-    std::vector<std::vector<cv::DMatch>> new_raw_matches;
-    new_matcher.knnMatch(next_descriptors, cur_descriptors,
-                         new_raw_matches, 4);
-
-    MatVec track_descriptors;
-    KeyPointVec track_keypoints;
-    for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
-
-      cv::DMatch best_match = new_raw_matches[idx][0];
-      cv::DMatch second_best_match = new_raw_matches[idx][1];
-      assert(best_match.queryIdx == second_best_match.queryIdx);
-      assert(best_match.trainIdx != second_best_match.trainIdx);
-
-      if (best_match.distance < RATIO_THRESHOLD * second_best_match.distance) {
-        cv::Mat train_desc = cur_descriptors.row(best_match.trainIdx);
-        cv::Mat query_desc = next_descriptors.row(best_match.queryIdx);
-        cv::KeyPoint &train_keypoint = cur_keypoints[best_match.trainIdx];
-        cv::KeyPoint &query_keypoint = next_keypoints[best_match.queryIdx];
-
-        track_descriptors.push_back(query_desc);
-        track_keypoints.push_back(query_keypoint);
-
-        next_descriptors_set.erase(query_desc);
-        next_keypoints_set.erase(query_keypoint);
-
-        auto& kpn_parent = kpn_map[train_keypoint.class_id];
-        kpn_parent.leaf = false;
-
-        // Set best match as our parent
-        query_keypoint.class_id = keypoint_counter++;
-        KeyPointNode kpn;
-        kpn.keypoint = query_keypoint;
-        kpn.keypoint.class_id = keypoint_counter++;
-        kpn.parent = train_keypoint.class_id;
-        kpn.leaf = true;
-
-        kpn_map[query_keypoint.class_id] = kpn;
-      } else {
-//        std::cout << best_match.distance <<
-//         " " << second_best_match.distance << std::endl;
-      }
-    }
-
-//    MatVec nd (next_descriptors_set.begin(), next_descriptors_set.end());
-//    next_descriptors = MatVecToMat(nd);
-//
-//    next_keypoints = KeyPointVec(next_keypoints_set.begin(),
-//                                 next_keypoints_set.end());
-////    GetGoodDescriptors(next_descriptors, next_keypoints,
-////                       next_descriptors, next_keypoints);
-//
-//    // Union
-//    next_descriptors.push_back(MatVecToMat(track_descriptors));
-    cur_descriptors = next_descriptors.clone();
-
-//    next_keypoints.insert(next_keypoints.end(), track_keypoints.begin(),
-//                          track_keypoints.end());
-    cur_keypoints = next_keypoints;
-  }
+  MatVec images = measure.GetImages(50);
+  Measure::KpnMap kpn_map = measure.ProcessImages(images);
 
   // Paint the lines
   cv::Mat color_image;
@@ -726,7 +778,7 @@ int main (int argc, char **argv) {
     mpl.SendData(NumpyArray(name, vec));
   };
 
-  sendVec(metadata, "metadata");
+  sendVec(measure.GetMetadata(), "metadata");
 
   std::vector<double> distances;
   std::vector<std::array<double, 2>> feature_points;
@@ -744,6 +796,7 @@ int main (int argc, char **argv) {
                           motion_vecs.size(), motion_vecs[0].size()));
 
   sendMat(images.back(), "cur_image");
+  cv::Mat mask = measure.GetMask();
   mask.convertTo(mask, CV_64F);
   sendMat(mask, "mask");
   mpl.RunCode("images = []");
