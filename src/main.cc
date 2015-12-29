@@ -578,10 +578,6 @@ int main (int argc, char **argv) {
     MatVec track_descriptors;
     KeyPointVec track_keypoints;
     for (size_t idx = 0; idx != new_raw_matches.size(); ++idx) {
-//      for (size_t j=0; j != 4; ++j) {
-//        std::cout << new_raw_matches[idx][j].distance << " ";
-//      }
-//      std::cout << std::endl;
 
       cv::DMatch best_match = new_raw_matches[idx][0];
       cv::DMatch second_best_match = new_raw_matches[idx][1];
@@ -597,11 +593,8 @@ int main (int argc, char **argv) {
         track_descriptors.push_back(query_desc);
         track_keypoints.push_back(query_keypoint);
 
-//        std::cout << next_descriptors_set.size();
         next_descriptors_set.erase(query_desc);
         next_keypoints_set.erase(query_keypoint);
-//        std::cout << " --> " << next_descriptors_set.size()
-//          << "  " << float(best_match.distance) / second_best_match.distance << std::endl;
 
         auto& kpn_parent = kpn_map[train_keypoint.class_id];
         kpn_parent.leaf = false;
@@ -649,18 +642,7 @@ int main (int argc, char **argv) {
       points.push_back(kpn.keypoint.pt);
       while (kpn.parent >= 0) {
         ++count;
-        auto next_kpn = kpn_map.at(kpn.parent);
-
-//        // Detect loops
-//        if (seen_points.count(kpn.parent)) {
-////        if (kpn.parent.rows == next_kpn.parent.rows &&
-////            std::equal_to<cv::Mat>()(kpn.parent, next_kpn.parent)) {
-//          std::cout << "Loop detected" << std::endl;
-//          count = 0;
-//          break;
-//        }
-
-        kpn = next_kpn;
+        kpn = kpn_map.at(kpn.parent);
         points.push_back(kpn.keypoint.pt);
       }
 
