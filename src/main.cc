@@ -29,8 +29,8 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 #include <opencv2/features2d.hpp>
-#include <opencv2/xfeatures2d.hpp>
-#include <opencv2/xfeatures2d/nonfree.hpp>
+//#include <opencv2/xfeatures2d.hpp>
+//#include <opencv2/xfeatures2d/nonfree.hpp>
 
 #include <cpp_mpl.hpp>
 
@@ -54,7 +54,7 @@ constexpr uint32_t GIMX_UDP_BUF_SIZE = 158;
 constexpr double DISTANCE_THRESHOLD = 750.0;
 constexpr double RATIO_THRESHOLD = 0.65;
 std::string MASK_IMAGE_FILE = "/tmp/mask.png";
-
+std::string WINDOW = "Figure jimx";
 
 bool FileExists (std::string filename) {
   std::ifstream file_check(filename);
@@ -224,6 +224,8 @@ public:
       std::cout << "capture error" << std::endl;
     }
 
+    uint32_t *embedded_info = (uint32_t*)rawImage.GetData();
+
     cv::Mat tmp_image;
     if (rawImage.GetPixelFormat() == fc::PIXEL_FORMAT_RAW8) {
      // convert to rgb
@@ -243,6 +245,10 @@ public:
 
     cv::Mat image;
     cv::resize(tmp_image, image, cv::Size(0, 0), SCALE, SCALE, cv::INTER_CUBIC);
+    uint32_t* target_info = (uint32_t*)image.data;
+    target_info[0] = embedded_info[0];
+    target_info[1] = embedded_info[1];
+
     return image;
   }
 
@@ -431,23 +437,26 @@ int main (int argc, char **argv) {
 
   flea3.GetImage();
 
-  XboneControl ctl;
-  ctl.right_stick.x = 25000;
-  gimx.SendControl(ctl);
-
   cv::Mat mask;
   if (!FileExists(MASK_IMAGE_FILE)) {
     // Compute mask
     std::cout << "Creating motion mask. Takes about 10 seconds." << std::endl;
+    XboneControl ctl;
+    ctl.right_stick.x = 25000;
+    gimx.SendControl(ctl);
+
     MatVec mask_images;
     for (size_t capture_count = 0; capture_count != 600; ++capture_count) {
       mask_images.push_back(flea3.GetImageFloat() / 255.0);
-      cv::imshow("image", mask_images.back());
+      cv::imshow(WINDOW, mask_images.back());
       cv::waitKey(1);
       for (size_t skip_count = 0; skip_count != 0; ++skip_count) {
         flea3.GetImage();
       }
     }
+
+    ctl.right_stick.x = 0;
+    gimx.SendControl(ctl);
 
     // Deltas between successive mask_images
     std::cout << "  Computing deltas" << std::endl;
@@ -476,13 +485,14 @@ int main (int argc, char **argv) {
     cv::GaussianBlur(std_diff, mask, cv::Size(0, 0), 1.0);
     cv::threshold(mask, mask, 0.25, 1.0, cv::THRESH_BINARY);
     cv::erode(mask, mask, cv::getStructuringElement(cv::MORPH_RECT,
-                                                    cv::Size(3, 3)));
+                                                    cv::Size(3, 3)),
+              cv::Point(-1, -1), 8);
     mask *= 255;
     mask.convertTo(mask, CV_8UC1);
 
     cv::imwrite(MASK_IMAGE_FILE, mask);
 
-    cv::imshow("image", mask);
+    cv::imshow(WINDOW, mask);
     cv::waitKey(0);
   } else {
     mask = cv::imread(MASK_IMAGE_FILE);
@@ -499,7 +509,15 @@ int main (int argc, char **argv) {
   double counter = 0;
   auto detdes_ptr = cv::BRISK::create();
   MatVec images;
-  for (size_t capture_count = 0; key != 'q' && capture_count < 100;
+
+  XboneControl ctl;
+  ctl.right_stick.x = 29250;
+  gimx.SendControl(ctl);
+  usleep(1.0e6);
+
+  uint32_t frame_count = 0;
+  uint32_t last_frame_count = 0;
+  for (size_t capture_count = 0; key != 'q' && capture_count < 50;
        ++capture_count) {
     struct timeval time;
     gettimeofday(&time, NULL);
@@ -513,14 +531,22 @@ int main (int argc, char **argv) {
     // Get the image
     cv::Mat image = flea3.GetImage();
     images.push_back(image);
-    cv::imshow("image", image);
-    key = cv::waitKey(0) & 0xff;
+    cv::imshow(WINDOW, image);
+    key = cv::waitKey(1) & 0xff;
+    uint32_t* embedded_info = (uint32_t*)image.data;
+    last_frame_count = frame_count;
+    frame_count = embedded_info[1];
 
     // Skip some frames -- keeps timing accurate
-    for (size_t skips = 20; skips != 0; --skips) {
+    for (size_t skips = 0; skips != 0; --skips) {
       flea3.GetImage();
     }
   }
+  std::vector<double> metadata;
+  metadata.push_back(frame_count - last_frame_count);
+
+  ctl.right_stick.x = 0;
+  gimx.SendControl(ctl);
 
   // Now extract feature tracks
   // Pass 1, figure out all descriptors of interest.
@@ -634,6 +660,7 @@ int main (int argc, char **argv) {
   // Paint the lines
   cv::Mat color_image;
   cv::cvtColor(images[0], color_image, cv::COLOR_GRAY2RGB);
+  std::vector<std::array<double, 4>> motion_vecs;
   for (const auto& kv : kpn_map) {
     KeyPointNode kpn = kv.second;
     size_t count = 0;
@@ -646,10 +673,18 @@ int main (int argc, char **argv) {
         points.push_back(kpn.keypoint.pt);
       }
 
-      if (count > 4) {
+      if (count > 0) {
         for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
-          cv::line(color_image, points[pidx], points[pidx+1], {100, 100, 255});
-          cv::circle(color_image, points[pidx], 1, {150, 150, 255});
+          const auto &pt1 = points[pidx];
+          const auto &pt2 = points[pidx+1];
+
+          cv::line(color_image, pt1, pt2, {100, 100, 255});
+          cv::circle(color_image, pt1, 1, {150, 150, 255});
+          if (std::abs(pt2.x - pt1.x) > 1) {
+            motion_vecs.push_back({{(double)pt1.x, (double)pt1.y,
+                                  (double)pt2.x - pt1.x,
+                                  (double)pt2.y - pt1.y}});
+          }
 
         }
         cv::circle(color_image, points.back(), 3, {0, 0, 255});
@@ -657,10 +692,8 @@ int main (int argc, char **argv) {
     }
   }
 
-  cv::imshow("image", color_image);
+  cv::imshow(WINDOW, color_image);
   cv::waitKey(0);
-
-  std::vector<std::array<double, 4>> motion_vecs;
 
   //  cv::Mat color_image;
   //  cv::cvtColor(image_1, color_image, cv::COLOR_GRAY2RGB);
@@ -673,10 +706,11 @@ int main (int argc, char **argv) {
   //      motion_vecs.push_back({{pt1.x, pt1.y, pt2.x-pt1.x, pt2.y-pt1.y}});
   //    }
   //  }
-  //  cv::imshow("image", color_image);
+  //  cv::imshow(WINDOW, color_image);
 
   gimx.SendControl(XboneControl());
 
+  std::cout << "Transferring data to ipython" << std::endl;
   auto mpl = MplConnect("/tmp/kernel.json");
 
   auto sendMat = [&] (const cv::Mat &mat, const std::string &name) {
@@ -692,6 +726,8 @@ int main (int argc, char **argv) {
     mpl.SendData(NumpyArray(name, vec));
   };
 
+  sendVec(metadata, "metadata");
+
   std::vector<double> distances;
   std::vector<std::array<double, 2>> feature_points;
   for (const auto &kv : kpn_map) {
@@ -702,10 +738,10 @@ int main (int argc, char **argv) {
   sendVec(distances, "distances");
 
   mpl.SendData(NumpyArray("points", (double*)feature_points.data(),
-                          feature_points.size(), 2));
+                          feature_points.size(), feature_points[0].size()));
 
   mpl.SendData(NumpyArray("mv", (double*)motion_vecs.data(),
-                          motion_vecs.size(), 4));
+                          motion_vecs.size(), motion_vecs[0].size()));
 
   sendMat(images.back(), "cur_image");
   mask.convertTo(mask, CV_64F);
