@@ -440,7 +440,7 @@ public:
     gimx_.Connect();
   }
 
-  MatVec GetImages (size_t N) {
+  MatVec GetImages (size_t N, int x, int y, size_t skip) {
     // capture loop
     char key = 0;
     struct timeval prev_time;
@@ -450,7 +450,8 @@ public:
     MatVec images;
 
     XboneControl ctl;
-    ctl.right_stick.x = 29250;
+    ctl.right_stick.x = x;
+    ctl.right_stick.y = y;
     gimx_.SendControl(ctl);
     usleep(1.0e6);
 
@@ -475,9 +476,10 @@ public:
       uint32_t* embedded_info = (uint32_t*)image.data;
       last_frame_count = frame_count;
       frame_count = embedded_info[1];
+      std::cout << frame_count - last_frame_count << std::endl;
 
       // Skip some frames -- keeps timing accurate
-      for (size_t skips = 0; skips != 0; --skips) {
+      for (size_t skips = skip; skips != 0; --skips) {
         flea3_p_->GetImage();
       }
     }
