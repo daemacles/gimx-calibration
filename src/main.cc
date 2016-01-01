@@ -287,6 +287,25 @@ cppmpl::CppMatplotlib MplConnect (std::string config_path="") {
   return mpl;
 }
 
+void SendMat (cppmpl::CppMatplotlib &mpl,
+              const cv::Mat &mat, const std::string &name) {
+  cv::Mat output(mat.rows, mat.cols, CV_64F);
+  mat.convertTo(output, CV_64F);
+  auto np_data = NumpyArray(name, (double*)output.data, output.rows,
+                            output.cols);
+  mpl.SendData(np_data);
+};
+
+void SendMatrix (cppmpl::CppMatplotlib &mpl,
+                 const MatrixXd &mat, const std::string &name) {
+  auto np_data = NumpyArray(name, (double*)mat.data(), mat.rows(), mat.cols());
+  mpl.SendData(np_data);
+};
+
+void SendVec (cppmpl::CppMatplotlib &mpl,
+              const std::vector<double> &vec, const std::string &name) {
+  mpl.SendData(NumpyArray(name, vec));
+};
 
 namespace std {
 template<> struct equal_to<cv::Mat> {
@@ -440,7 +459,26 @@ public:
     gimx_.Connect();
   }
 
-  MatVec GetImages (size_t N, int x, int y, size_t skip) {
+  /**
+   * \brief Applies rotation controls to the controller.
+   */
+  void SetControls (int x, int y) {
+    XboneControl ctl;
+    ctl.right_stick.x = x;
+    ctl.right_stick.y = y;
+    gimx_.SendControl(ctl);
+  }
+
+
+  /**
+   * \brief Retrives N images from the camera.
+   *
+   * \param N number of images to grab
+   * \param skip frames to skip between grabs (must be at least 1)
+   */
+  MatVec GetImages (size_t N, size_t skip=1) {
+    assert(skip > 0);
+
     // capture loop
     char key = 0;
     struct timeval prev_time;
@@ -448,12 +486,6 @@ public:
     double diff_us = 0;
     double counter = 0;
     MatVec images;
-
-    XboneControl ctl;
-    ctl.right_stick.x = x;
-    ctl.right_stick.y = y;
-    gimx_.SendControl(ctl);
-    usleep(1.0e6);
 
     uint32_t frame_count = 0;
     uint32_t last_frame_count = 0;
@@ -465,7 +497,7 @@ public:
         0.5 * ((time.tv_usec + 1000000 * time.tv_sec) -
                (prev_time.tv_usec + 1000000 * prev_time.tv_sec));
       prev_time = time;
-      std::cout << "Period: " << 1e6 / diff_us << "Hz" << std::endl;
+      //std::cout << "Period: " << 1e6 / diff_us << "Hz" << std::endl;
       counter += diff_us / 1e6;
 
       // Get the image
@@ -476,17 +508,13 @@ public:
       uint32_t* embedded_info = (uint32_t*)image.data;
       last_frame_count = frame_count;
       frame_count = embedded_info[1];
-      std::cout << frame_count - last_frame_count << std::endl;
 
       // Skip some frames -- keeps timing accurate
-      for (size_t skips = skip; skips != 0; --skips) {
+      for (size_t skipped = 1; skipped != skip; ++skipped) {
         flea3_p_->GetImage();
       }
     }
     metadata_[0] = frame_count - last_frame_count;
-
-    ctl.right_stick.x = 0;
-    gimx_.SendControl(ctl);
 
     return images;
   }
@@ -522,8 +550,14 @@ public:
 
     // Track successive keypoints
     std::cout << "Finding tracks" << std::endl;
+    std::cout << "Processing " << images.size() << " images." << std::endl;
+    std::cout << '|' << std::string(images.size(), '-') << '|' << std::endl;
+    std::cout << " #";
+
     for (size_t idx=1; idx != images.size(); ++idx) {
-      std::cout << "  Processing image " << idx << std::endl;
+      std::cout << '#';
+      std::cout.flush();
+
       cur_image = images[idx];
 
       cv::Mat next_descriptors;
@@ -601,6 +635,7 @@ public:
       //                          track_keypoints.end());
       cur_keypoints = next_keypoints;
     }
+    std::cout << std::endl;
     return kpn_map;
   }
 
@@ -655,7 +690,7 @@ public:
 
       // Create the mask
       cv::GaussianBlur(std_diff, mask, cv::Size(0, 0), 1.0);
-      cv::threshold(mask, mask, 0.25, 1.0, cv::THRESH_BINARY);
+      cv::threshold(mask, mask, 0.10, 1.0, cv::THRESH_BINARY);
       cv::erode(mask, mask, cv::getStructuringElement(cv::MORPH_RECT,
                                                       cv::Size(3, 3)),
                 cv::Point(-1, -1), 8);
@@ -677,6 +712,46 @@ public:
     return mask;
   }
 
+
+  MatrixXd ExtractMotionVectors (const KpnMap &kpn_map) {
+    std::vector<std::array<double, 4>> motion_vecs;
+
+    // Insert dummy value just so it won't be empty
+    motion_vecs.push_back({{0, 0, 0, 0}});
+
+    for (const auto& kv : kpn_map) {
+      KeyPointNode kpn = kv.second;
+      size_t count = 0;
+      if (kpn.leaf) {
+        std::vector<cv::Point> points;
+        points.push_back(kpn.keypoint.pt);
+        while (kpn.parent >= 0) {
+          ++count;
+          kpn = kpn_map.at(kpn.parent);
+          points.push_back(kpn.keypoint.pt);
+        }
+
+        if (count > 0) {
+          for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
+            const auto &pt1 = points[pidx];
+            const auto &pt2 = points[pidx+1];
+
+            if (std::abs(pt2.x - pt1.x) > 1) {
+              motion_vecs.push_back({{(double)pt1.x, (double)pt1.y,
+                                    (double)pt2.x - pt1.x,
+                                    (double)pt2.y - pt1.y}});
+            }
+          }
+        }
+      }
+    }
+
+    MatrixXd motions =
+      Eigen::Map<MatrixXd>((double*)motion_vecs.data(), motion_vecs.size(),
+                           motion_vecs[0].size());
+    return motions;
+  }
+
   std::vector<double> GetMetadata (void) {
     return metadata_;
   }
@@ -695,6 +770,8 @@ int main (int argc, char **argv) {
   (void) argc;
   (void) argv;
 
+  auto mpl = MplConnect("/tmp/kernel.json");
+
   GimxConnection gimx("localhost", 7799);
   gimx.Connect();
 
@@ -704,110 +781,134 @@ int main (int argc, char **argv) {
     std::exit(1);
   }
 
-  flea3_p->GetImage();
+  cv::imshow(WINDOW, flea3_p->GetImage());
 
   Measure measure(gimx, flea3_p);
+  measure.GetMask();
 
-  MatVec images = measure.GetImages(50);
-  Measure::KpnMap kpn_map = measure.ProcessImages(images);
+  mpl.RunCode("images = []");
+  mpl.RunCode("M = []");
+  std::vector<double> skips;
+  std::vector<double> controls;
+  int skip = 1;
 
-  // Paint the lines
-  cv::Mat color_image;
-  cv::cvtColor(images[0], color_image, cv::COLOR_GRAY2RGB);
-  std::vector<std::array<double, 4>> motion_vecs;
-  for (const auto& kv : kpn_map) {
-    KeyPointNode kpn = kv.second;
-    size_t count = 0;
-    if (kpn.leaf) {
-      std::vector<cv::Point> points;
-      points.push_back(kpn.keypoint.pt);
-      while (kpn.parent >= 0) {
-        ++count;
-        kpn = kpn_map.at(kpn.parent);
-        points.push_back(kpn.keypoint.pt);
+  for (int x_control=31000; x_control >= 0; x_control -= 100) {
+    //int x_control = 30000;
+
+    std::cout << "######## Control " << x_control << " ########" << std::endl;
+
+    double median = 0;
+
+    measure.SetControls(x_control, 0);
+    usleep(1.0e6);
+
+    bool too_slow = false;
+    while (true) {
+      if (skip > 90) {
+        std::cout << "Too little motion" << std::endl;
+        too_slow = true;
+        break;
       }
 
-      if (count > 0) {
-        for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
-          const auto &pt1 = points[pidx];
-          const auto &pt2 = points[pidx+1];
+      std::cout << "Skip is " << skip << std::endl;
+      MatVec images = measure.GetImages(2, skip);
+      Measure::KpnMap kpn_map = measure.ProcessImages(images);
+      MatrixXd motions = measure.ExtractMotionVectors(kpn_map);
+      Eigen::VectorXd delta_x = motions.col(2);
+      std::sort(delta_x.data(), delta_x.data()+delta_x.size());
+      median = delta_x[delta_x.size()/2];
+      std::cout << "Median x delta " << median << std::endl;
 
-          cv::line(color_image, pt1, pt2, {100, 100, 255});
-          cv::circle(color_image, pt1, 1, {150, 150, 255});
-          if (std::abs(pt2.x - pt1.x) > 1) {
-            motion_vecs.push_back({{(double)pt1.x, (double)pt1.y,
-                                  (double)pt2.x - pt1.x,
-                                  (double)pt2.y - pt1.y}});
-          }
-
-        }
-        cv::circle(color_image, points.back(), 3, {0, 0, 255});
+      if (median > 30) {
+        break;
+      } else {
+        skip = (int)std::max((double)(skip) * 1.3, (double)skip+1);
       }
     }
+
+    if (too_slow) {
+      continue;
+    }
+
+    skips.push_back(skip);
+    controls.push_back(x_control);
+
+    MatVec images = measure.GetImages(50, skip);
+    measure.SetControls(0, 0);
+
+    Measure::KpnMap kpn_map = measure.ProcessImages(images);
+    MatrixXd motions = measure.ExtractMotionVectors(kpn_map);
+
+    SendMatrix(mpl, motions, "motions");
+    mpl.RunCode("M.append(motions.copy())");
+
+    std::cout << "delta T is " << skip << std::endl;
+
+    std::vector<double> distances;
+    std::vector<std::array<double, 2>> feature_points;
+    for (const auto &kv : kpn_map) {
+      distances.push_back(kv.second.keypoint.response);
+      feature_points.push_back({{kv.second.keypoint.pt.x,
+                               kv.second.keypoint.pt.y}});
+    }
+    SendVec(mpl, distances, "distances");
+
+    mpl.SendData(NumpyArray("points", (double*)feature_points.data(),
+                            feature_points.size(), feature_points[0].size()));
+
+    SendMat(mpl, images.back(), "tmp_image");
+    mpl.RunCode("images.append(tmp_image.copy())");
+
+    //SendMat(mpl, images.back(), "cur_image");
   }
 
-  cv::imshow(WINDOW, color_image);
-  cv::waitKey(0);
+  SendVec(mpl, skips, "S");
+  SendVec(mpl, controls, "C");
 
-  //  cv::Mat color_image;
-  //  cv::cvtColor(image_1, color_image, cv::COLOR_GRAY2RGB);
-  //  for (const auto &match : ratio_matches) {
-  //    auto pt1 = keypoints_1[match.queryIdx].pt;
-  //    auto pt2 = keypoints_2[match.trainIdx].pt;
-  //    cv::circle(color_image, pt1, 3, {0, 0, 255});
-  //    cv::line(color_image, pt1, pt2, {0, 0, 255});
-  //    if (std::abs(pt2.x - pt1.x) > 4) {
-  //      motion_vecs.push_back({{pt1.x, pt1.y, pt2.x-pt1.x, pt2.y-pt1.y}});
-  //    }
-  //  }
-  //  cv::imshow(WINDOW, color_image);
+  // Paint the lines
+//  cv::Mat color_image;
+//  cv::cvtColor(images[0], color_image, cv::COLOR_GRAY2RGB);
+//  for (const auto& kv : kpn_map) {
+//    KeyPointNode kpn = kv.second;
+//    size_t count = 0;
+//    if (kpn.leaf) {
+//      std::vector<cv::Point> points;
+//      points.push_back(kpn.keypoint.pt);
+//      while (kpn.parent >= 0) {
+//        ++count;
+//        kpn = kpn_map.at(kpn.parent);
+//        points.push_back(kpn.keypoint.pt);
+//      }
+//
+//      if (count > 0) {
+//        for (size_t pidx=0; pidx != points.size()-1; ++pidx) {
+//          const auto &pt1 = points[pidx];
+//          const auto &pt2 = points[pidx+1];
+//
+//          cv::line(color_image, pt1, pt2, {100, 100, 255});
+//          cv::circle(color_image, pt1, 1, {150, 150, 255});
+//        }
+//        cv::circle(color_image, points.back(), 3, {0, 0, 255});
+//      }
+//    }
+//  }
 
-  gimx.SendControl(XboneControl());
+//  cv::imshow(WINDOW, color_image);
+//  cv::waitKey(0);
+  cv::destroyWindow(WINDOW);
+  cv::waitKey(1);
 
   std::cout << "Transferring data to ipython" << std::endl;
-  auto mpl = MplConnect("/tmp/kernel.json");
 
-  auto sendMat = [&] (const cv::Mat &mat, const std::string &name) {
-    cv::Mat output(mat.rows, mat.cols, CV_64F);
-    mat.convertTo(output, CV_64F);
-    auto np_data = NumpyArray(name, (double*)output.data, output.rows,
-                              output.cols);
-    mpl.SendData(np_data);
-  };
+//  SendMatrix(mpl, motions, "motions");
+  SendVec(mpl, measure.GetMetadata(), "metadata");
 
-  auto sendVec = [&] (const std::vector<double> &vec,
-                      const std::string &name) {
-    mpl.SendData(NumpyArray(name, vec));
-  };
-
-  sendVec(measure.GetMetadata(), "metadata");
-
-  std::vector<double> distances;
-  std::vector<std::array<double, 2>> feature_points;
-  for (const auto &kv : kpn_map) {
-    distances.push_back(kv.second.keypoint.response);
-    feature_points.push_back({{kv.second.keypoint.pt.x,
-                               kv.second.keypoint.pt.y}});
-  }
-  sendVec(distances, "distances");
-
-  mpl.SendData(NumpyArray("points", (double*)feature_points.data(),
-                          feature_points.size(), feature_points[0].size()));
-
-  mpl.SendData(NumpyArray("mv", (double*)motion_vecs.data(),
-                          motion_vecs.size(), motion_vecs[0].size()));
-
-  sendMat(images.back(), "cur_image");
   cv::Mat mask = measure.GetMask();
   mask.convertTo(mask, CV_64F);
-  sendMat(mask, "mask");
-  mpl.RunCode("images = []");
-  for (const auto& image : images) {
-    sendMat(image, "tmp_image");
-    mpl.RunCode("images.append(tmp_image)");
-  }
+  SendMat(mpl, mask, "mask");
 
   //mpl.RunCode("plot(XX[:, 0], XX[:, 1])");
 
+  gimx.SendControl(XboneControl());
   return 0;
 }
