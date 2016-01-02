@@ -3,13 +3,13 @@ set (PROJECT_NAME gimx-calibration)
 project (${PROJECT_NAME})
 
 # Compile flags
-SET (CMAKE_C_FLAGS                "-Wall -std=c11 -Wextra -Werror")
+SET (CMAKE_C_FLAGS                "-Wall -std=c11 -Wextra")
 SET (CMAKE_C_FLAGS_DEBUG          "${CMAKE_CFLAGS} -g")
 SET (CMAKE_C_FLAGS_MINSIZEREL     "${CMAKE_CFLAGS} -Os -DNDEBUG")
 SET (CMAKE_C_FLAGS_RELEASE        "${CMAKE_CFLAGS} -O3 -DNDEBUG")
 SET (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_CFLAGS} -O2 -g")
 
-SET (CMAKE_CXX_FLAGS                "-Wall -std=c++11 -Wextra -Werror")
+SET (CMAKE_CXX_FLAGS                "-Wall -std=c++11 -Wextra -fPIE") 
 SET (CMAKE_CXX_FLAGS_DEBUG          "${CMAKE_CXXFLAGS} -g")
 SET (CMAKE_CXX_FLAGS_MINSIZEREL     "${CMAKE_CXXFLAGS} -Os -DNDEBUG")
 SET (CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXXFLAGS} -O2 -g")
@@ -18,10 +18,18 @@ SET (CMAKE_CXX_FLAGS_RELEASE        "${CMAKE_CXXFLAGS} -O3 -DNDEBUG")
 set (CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake_modules")
 include (cotire)
 
+# Find includes in corresponding build directories
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+# Instruct CMake to run moc automatically when needed.
+set(CMAKE_AUTOMOC ON)
+
+find_package(Qt5Widgets REQUIRED)
 find_package (Eigen3 REQUIRED)
 include_directories(${EIGEN3_INCLUDE_DIR})
 find_package (OpenCV REQUIRED)
 find_package (cpp-matplotlib REQUIRED)
+
+add_definitions(${Qt5Widgets_DEFINITIONS})
 
 ## Set optional features.  This will show up as a preprocessor variable
 option (USE_GLIBCXX_DEBUG 
@@ -58,6 +66,12 @@ target_link_libraries (${PROJECT_NAME} ${EXTRA_LIBS} ${LIBS} flycapture)
 set_target_properties (
   ${PROJECT_NAME} PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT "src/headers_pch.h")
 #cotire (${PROJECT_NAME})
+
+add_executable (control src/control.cc)
+qt5_use_modules(control Widgets)
+target_link_libraries (${PROJECT_NAME} 
+  ${EXTRA_LIBS} ${LIBS} 
+  ${Qt5Widgets_LIBRARIES})
 
 if (USE_GLIBCXX_DEBUG)
   # Prefer using G++ for debug mode because the GLIBCXX_DEBUG flag for pretty

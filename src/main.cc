@@ -1,16 +1,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <cstdlib>
-#include <cstring>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <fstream>
@@ -18,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,12 +25,14 @@
 //#include <opencv2/xfeatures2d.hpp>
 //#include <opencv2/xfeatures2d/nonfree.hpp>
 
-#include <cpp_mpl.hpp>
-
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-register"
 #include <eigen3/Eigen/Dense>
 #pragma clang diagnostic pop
+
+#include <cpp_mpl.hpp>
+
+#include "gimx.h"
 
 using cppmpl::NumpyArray;
 
@@ -50,11 +45,13 @@ typedef std::unordered_set<cv::KeyPoint> KeyPointSet;
 
 cppmpl::CppMatplotlib MplConnect (std::string config_path);
 
-constexpr uint32_t GIMX_UDP_BUF_SIZE = 158;
 constexpr double DISTANCE_THRESHOLD = 750.0;
 constexpr double RATIO_THRESHOLD = 0.65;
 std::string MASK_IMAGE_FILE = "/tmp/mask.png";
 std::string WINDOW = "Figure jimx";
+
+std::random_device rd;
+std::mt19937 rand_gen(rd());
 
 bool FileExists (std::string filename) {
   std::ifstream file_check(filename);
@@ -62,108 +59,6 @@ bool FileExists (std::string filename) {
   file_check.close();
   return found;
 }
-
-
-class GimxController {
-public:
-  void SerializeTo (uint8_t *buf) const {
-    memset(buf, 0, GIMX_UDP_BUF_SIZE-2);
-    SerializeTo_((int32_t*)buf);
-  }
-
-private:
-  virtual void SerializeTo_ (int32_t *axes) const = 0;
-};
-
-
-struct Stick {
-  int32_t x = 0;
-  int32_t y = 0;
-};
-
-
-class XboneControl : public GimxController {
-public:
-  Stick left_stick;
-  Stick right_stick;
-
-  void SerializeTo_ (int32_t *axes) const override {
-    axes[0] = left_stick.x;
-    axes[1] = left_stick.y;
-    axes[2] = right_stick.x;
-    axes[3] = right_stick.y;
-  }
-};
-
-
-class GimxConnection {
-public:
-
-  GimxConnection (std::string hostname, uint32_t port) :
-      hostname_(hostname),
-      port_(port),
-      sock_fd_(-1)
-  {
-  }
-
-  ~GimxConnection () {
-    if (sock_fd_ != -1) {
-      close(sock_fd_);
-    }
-  }
-
-  bool Connect () {
-    struct hostent *host;
-
-    host = gethostbyname(hostname_.c_str());
-    if (host == NULL) {
-      perror("gethostbyname");
-      return false;
-    }
-
-    /* initialize socket */
-    if ((sock_fd_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
-      perror("socket");
-      return false;
-    }
-
-    /* initialize server addr */
-    server_ = {
-      .sin_family = AF_INET,
-      .sin_port = htons(port_),
-      .sin_addr = *((struct in_addr*) host->h_addr)
-    };
-
-    return true;
-  }
-
-  bool SendControl (const GimxController &ctl) {
-    if (sock_fd_ == -1) {
-      throw std::runtime_error("GIMX socket not connected");
-    }
-
-    uint8_t buf[GIMX_UDP_BUF_SIZE];
-    buf[0] = 0xff;
-    buf[1] = GIMX_UDP_BUF_SIZE - 2;
-
-    ctl.SerializeTo(&buf[2]);
-
-    /* send message */
-    int len = sizeof(server_);
-    if (sendto(sock_fd_, buf, GIMX_UDP_BUF_SIZE, 0,
-               (struct sockaddr *) &server_, len) == -1) {
-      perror("sendto()");
-      return false;
-    }
-    return true;
-  }
-
-private:
-  std::string hostname_;
-  uint32_t port_;
-  struct sockaddr_in server_;
-  int32_t sock_fd_;
-};
 
 
 namespace fc = FlyCapture2;
@@ -766,7 +661,58 @@ private:
 };
 
 
+int GetControl (double phi) {
+  double a = 0.00136871;
+  double c = 0.00017554;
+  double d = -0.0057529;
+  double inflection = 0.22262857715;
+  double fastest = 0.939737022742;
+
+  double sign = std::signbit(phi) ? -1 : 1;
+  phi = std::abs(phi);
+
+  if (phi < inflection) {
+    return sign*std::log((phi - d) / a) / c;
+  } else {
+    int exp_control = std::log((inflection - d) / a) / c;
+    int max_control = 32000;
+    std::uniform_real_distribution<> dis(inflection, fastest);
+    if (dis(rand_gen) < phi) {
+      return sign*max_control;
+    } else {
+      return sign*exp_control;
+    }
+  }
+}
+
+
 int main (int argc, char **argv) {
+  (void) argc;
+  (void) argv;
+
+  GimxConnection gimx("localhost", 7799);
+  gimx.Connect();
+
+  cv::namedWindow(WINDOW);
+
+  int x=400;
+  cv::createTrackbar("x_rot", WINDOW, &x, 800);
+
+  while ((cv::waitKey(4) & 0xFF) != 'q') {
+    double phi = (x - 400) / 400.0;
+    int x_control = GetControl(phi);
+    std::cout << x_control << std::endl;
+
+    XboneControl ctl;
+    ctl.right_stick.x = x_control;
+    ctl.right_stick.y = 0;
+    gimx.SendControl(ctl);
+  }
+
+  gimx.SendControl(XboneControl());
+}
+
+int main_old (int argc, char **argv) {
   (void) argc;
   (void) argv;
 
@@ -792,7 +738,7 @@ int main (int argc, char **argv) {
   std::vector<double> controls;
   int skip = 1;
 
-  for (int x_control=31000; x_control >= 0; x_control -= 100) {
+  for (int x_control=29777; x_control >= 0; x_control -= 100) {
     //int x_control = 30000;
 
     std::cout << "######## Control " << x_control << " ########" << std::endl;
