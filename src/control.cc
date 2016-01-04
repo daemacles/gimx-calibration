@@ -24,12 +24,12 @@ int GetControl (double phi) {
   if (phi < inflection) {
     return sign*std::log((phi - d) / a) / c;
   } else {
-    int exp_control = std::log((inflection - d) / a) / c;
-    int max_control = 32000;
     std::uniform_real_distribution<> dis(inflection, fastest);
-    if (dis(rand_gen) < phi) {
+    if (true || dis(rand_gen) < phi) {
+      int max_control = 32000;
       return sign*max_control;
     } else {
+      int exp_control = std::log((inflection - d) / a) / c;
       return sign*exp_control;
     }
   }
@@ -42,7 +42,7 @@ public:
       prev_(0.0),
       upper_thresh_(upper_thresh),
       range_(range),
-      exponent_(1.6)
+      exponent_(1.2)
   {
   }
 
@@ -56,7 +56,12 @@ public:
 
   int GetAxisValue (void) {
     double sign = std::signbit(accum_) ? -1 : 1;
+
+    // value will be between 0 and 1, where range_ represents the maximum
+    // expected input
     double value = std::min(std::abs(accum_), range_) / range_;
+
+    // apply acceleration curve and set between 0 and 0.94
     value = sign*std::pow(std::abs(value), exponent_) * 0.94 * 1;
 
     accum_ = 0;
@@ -90,7 +95,7 @@ private:
   GimxConnection gimx_;
   AxisControl x_axis_;
   AxisControl y_axis_;
-  std::map<Qt::Key, bool> keys_pressed_;
+  XboneControl ctl_;
 };
 
 GimxControl::GimxControl (QWidget *parent) :
@@ -103,12 +108,6 @@ GimxControl::GimxControl (QWidget *parent) :
   this->setMouseTracking(true);
   this->startTimer(4);
   gimx_.Connect();
-}
-
-void GimxControl::mousePressEvent(QMouseEvent *event) {
-  if (event->button() == Qt::LeftButton) {
-    std::cout << "Pressed " << event->x() << std::endl;
-  }
 }
 
 
@@ -133,21 +132,49 @@ void GimxControl::mouseMoveEvent(QMouseEvent *event) {
   }
 }
 
+void GimxControl::mousePressEvent(QMouseEvent *event) {
+  if (event->button() == Qt::LeftButton) {
+    ctl_.SetInput(XBONE_RT, 1000);
+  }
+}
+
 void GimxControl::mouseReleaseEvent(QMouseEvent *event) {
   if (event->button() == Qt::LeftButton) {
+    ctl_.SetInput(XBONE_RT, 0);
     std::cout << "Released " << event->x() << std::endl;
   }
 }
 
 void GimxControl::keyPressEvent(QKeyEvent *event) {
-  keys_pressed_[event->key()] = true;
+  if (mouse_grabbed_) {
+    switch(event->key()) {
+    case Qt::Key_W: ctl_.left_stick.y = -32000; break;
+    case Qt::Key_S: ctl_.left_stick.y = 32000; break;
+    case Qt::Key_A: ctl_.left_stick.x = -32000; break;
+    case Qt::Key_D: ctl_.left_stick.x = 32000; break;
+
+    case Qt::Key_B:       ctl_.SetInput(XBONE_GUIDE,  255); break;
+    case Qt::Key_V:       ctl_.SetInput(XBONE_VIEW,   255); break;
+    case Qt::Key_N:       ctl_.SetInput(XBONE_MENU,   255); break;
+    case Qt::Key_Z:       ctl_.SetInput(XBONE_B,      255); break;
+    case Qt::Key_Space:   ctl_.SetInput(XBONE_A,      255); break;
+    case Qt::Key_X:       ctl_.SetInput(XBONE_X,      255); break;
+    case Qt::Key_C:       ctl_.SetInput(XBONE_Y,      255); break;
+    case Qt::Key_Q:       ctl_.SetInput(XBONE_LB,     255); break;
+    case Qt::Key_E:       ctl_.SetInput(XBONE_RB,     255); break;
+    case Qt::Key_Control: ctl_.SetInput(XBONE_LT,    1000); break;
+    case Qt::Key_Up:      ctl_.SetInput(XBONE_UP,     255); break;
+    case Qt::Key_Down:    ctl_.SetInput(XBONE_DOWN,   255); break;
+    case Qt::Key_Left:    ctl_.SetInput(XBONE_LEFT,   255); break;
+    case Qt::Key_Right:   ctl_.SetInput(XBONE_RIGHT,  255); break;
+    default: break;
+    }
+  }
 }
 
 void GimxControl::keyReleaseEvent(QKeyEvent *event) {
-  keys_pressed_[event->key()] = false;
-
   switch(event->key()) {
-  case Qt::Key_Q:
+  case Qt::Key_P:
     QCoreApplication::exit(0);
     break;
 
@@ -164,13 +191,38 @@ void GimxControl::keyReleaseEvent(QKeyEvent *event) {
   default:
     break;
   }
+
+  if (mouse_grabbed_) {
+    switch(event->key()) {
+    case Qt::Key_W: ctl_.left_stick.y = 0; break;
+    case Qt::Key_S: ctl_.left_stick.y = 0; break;
+    case Qt::Key_A: ctl_.left_stick.x = 0; break;
+    case Qt::Key_D: ctl_.left_stick.x = 0; break;
+
+    case Qt::Key_B:       ctl_.SetInput(XBONE_GUIDE, 0); break;
+    case Qt::Key_V:       ctl_.SetInput(XBONE_VIEW,  0); break;
+    case Qt::Key_N:       ctl_.SetInput(XBONE_MENU,  0); break;
+    case Qt::Key_Z:       ctl_.SetInput(XBONE_B,     0); break;
+    case Qt::Key_Space:   ctl_.SetInput(XBONE_A,     0); break;
+    case Qt::Key_X:       ctl_.SetInput(XBONE_X,     0); break;
+    case Qt::Key_C:       ctl_.SetInput(XBONE_Y,     0); break;
+    case Qt::Key_Q:       ctl_.SetInput(XBONE_LB,    0); break;
+    case Qt::Key_E:       ctl_.SetInput(XBONE_RB,    0); break;
+    case Qt::Key_Control: ctl_.SetInput(XBONE_LT,    0); break;
+    case Qt::Key_Up:      ctl_.SetInput(XBONE_UP,    0); break;
+    case Qt::Key_Down:    ctl_.SetInput(XBONE_DOWN,  0); break;
+    case Qt::Key_Left:    ctl_.SetInput(XBONE_LEFT,  0); break;
+    case Qt::Key_Right:   ctl_.SetInput(XBONE_RIGHT, 0); break;
+
+    default: break;
+    }
+  }
 }
 
 void GimxControl::timerEvent (QTimerEvent *event) {
-  XboneControl ctl;
-  ctl.right_stick.x = x_axis_.GetAxisValue();
-  ctl.right_stick.y = y_axis_.GetAxisValue();
-  gimx_.SendControl(ctl);
+  ctl_.right_stick.x = x_axis_.GetAxisValue();
+  ctl_.right_stick.y = y_axis_.GetAxisValue();
+  gimx_.SendControl(ctl_);
 }
 
 int main (int argc, char *argv[]) {

@@ -11,8 +11,34 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 constexpr uint32_t GIMX_UDP_BUF_SIZE = 158;
+
+enum XboneIndices {
+  XBONE_LEFT_X  = 0,  // rel_axis_0   [-32768,   32767]
+  XBONE_LEFT_Y  = 1,  // rel_axis_1   [-32768,   32767]
+  XBONE_RIGHT_X = 2,  // rel_axis_2   [-32768,   32767]
+  XBONE_RIGHT_Y = 3,  // rel_axis_3   [-32768,   32767]
+  XBONE_VIEW    = 8,  // abs_axis_0   {0,        255}
+  XBONE_MENU    = 9,  // abs_axis_1   {0,        255}
+  XBONE_GUIDE   = 10, // abs_axis_2   {0,        255}
+  XBONE_UP      = 11, // abs_axis_3   {0,        255}
+  XBONE_RIGHT   = 12, // abs_axis_4   {0,        255}
+  XBONE_DOWN    = 13, // abs_axis_5   {0,        255}
+  XBONE_LEFT    = 14, // abs_axis_6   {0,        255}
+  XBONE_Y       = 15, // abs_axis_7   {0,        255}
+  XBONE_B       = 16, // abs_axis_8   {0,        255}
+  XBONE_A       = 17, // abs_axis_9   {0,        255}
+  XBONE_X       = 18, // abs_axis_10  {0,        255}
+  XBONE_LB      = 19, // abs_axis_11  {0,        255}
+  XBONE_RB      = 20, // abs_axis_12  {0,        255}
+  XBONE_LT      = 21, // abs_axis_13  [0,        1024]
+  XBONE_RT      = 22, // abs_axis_14  [0,        1023]
+  XBONE_LS      = 23, // abs_axis_15  {0,        255}
+  XBONE_RS      = 24, // abs_axis_16  {0,        255}
+  XBONE_NUM_INPUTS
+};
 
 class GimxController {
 public:
@@ -36,12 +62,39 @@ class XboneControl : public GimxController {
 public:
   Stick left_stick;
   Stick right_stick;
+  std::vector<int> inputs;
+
+  XboneControl () :
+      inputs(XBONE_NUM_INPUTS, 0)
+  {
+  }
+
+  void SetInput (int input, int value) {
+    inputs[input] = value;
+  }
 
   void SerializeTo_ (int32_t *axes) const override {
-    axes[0] = left_stick.x;
-    axes[1] = left_stick.y;
-    axes[2] = right_stick.x;
-    axes[3] = right_stick.y;
+    axes[XBONE_LEFT_X] = left_stick.x;
+    axes[XBONE_LEFT_Y] = left_stick.y;
+    axes[XBONE_RIGHT_X] = right_stick.x;
+    axes[XBONE_RIGHT_Y] = right_stick.y;
+    axes[XBONE_LT]     = inputs[XBONE_LT];
+    axes[XBONE_RT]     = inputs[XBONE_RT];
+    axes[XBONE_VIEW]   = inputs[XBONE_VIEW];
+    axes[XBONE_MENU]   = inputs[XBONE_MENU];
+    axes[XBONE_GUIDE]  = inputs[XBONE_GUIDE];
+    axes[XBONE_UP]     = inputs[XBONE_UP];
+    axes[XBONE_RIGHT]  = inputs[XBONE_RIGHT];
+    axes[XBONE_DOWN]   = inputs[XBONE_DOWN];
+    axes[XBONE_LEFT]   = inputs[XBONE_LEFT];
+    axes[XBONE_Y]      = inputs[XBONE_Y];
+    axes[XBONE_B]      = inputs[XBONE_B];
+    axes[XBONE_A]      = inputs[XBONE_A];
+    axes[XBONE_X]      = inputs[XBONE_X];
+    axes[XBONE_LB]     = inputs[XBONE_LB];
+    axes[XBONE_RB]     = inputs[XBONE_RB];
+    axes[XBONE_LS]     = inputs[XBONE_LS];
+    axes[XBONE_RS]     = inputs[XBONE_RS];
   }
 };
 
